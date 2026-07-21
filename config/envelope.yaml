@@ -1,0 +1,16 @@
+envelope:
+  trust_tiers: [public, internal, confidential, restricted]   # documentation/audit only — see below
+  content_hash_algo: sha256                                   # documentation/audit only — see below
+  content_hash_length: 64          # hex chars — documentation/audit only — see below
+  strict_schema: true              # reject unknown fields; must stay true, not overridable to false
+  default_allowed_groups: []       # default-deny; must stay empty, not overridable
+  error_codes:
+    ENVELOPE_INVALID: PERMANENT
+
+# NOTE: trust_tiers, content_hash_algo, content_hash_length, strict_schema, and
+# default_allowed_groups are listed here for documentation/audit visibility only.
+# None of them are read at runtime to change behavior. The authoritative definitions
+# live in code: ingestion/envelope/model.py (TrustTier enum, the
+# _content_hash_is_sha256_hex field validator, extra="forbid" on ArrivalEnvelope, and
+# the Field(default_factory=list) default on allowed_groups). Changing accepted values
+# or formats requires a code change (and a new LLD/PR), not a config edit.
