@@ -12,7 +12,6 @@ error code, `ENVELOPE_INVALID`, classified PERMANENT (never retried, always acke
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 from datetime import datetime, timezone
@@ -20,6 +19,8 @@ from enum import Enum
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+
+from ingestion.identity.derive import IdentityInvalid, derive_doc_id
 
 _CONTENT_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -94,6 +95,8 @@ class ArrivalEnvelope(BaseModel):
         Runs only after all field-level validators (incl. source/blob_path) have already
         succeeded — a model-level validator, not a field-level one, because a field_validator
         on doc_id cannot reliably see source/blob_path (declared later in the model).
+        compute_doc_id ultimately delegates to derive_doc_id (ingestion.identity.derive,
+        REQ-002), the canonical source of truth for the doc_id hash rule.
         """
         expected = compute_doc_id(self.source, self.blob_path)
         if self.doc_id != expected:
@@ -102,8 +105,9 @@ class ArrivalEnvelope(BaseModel):
 
 
 def compute_doc_id(source: str, blob_path: str) -> str:
-    """doc_id = sha256(source + blob_path), per Contract #2. Pure, deterministic."""
-    return hashlib.sha256((source + blob_path).encode("utf-8")).hexdigest()
+    """doc_id = sha256(source + blob_path), per Contract #2. Pure, deterministic.
+    Delegates to the canonical implementation in ingestion.identity.derive (REQ-002)."""
+    return derive_doc_id(source, blob_path)
 
 
 def build_envelope(
@@ -119,8 +123,12 @@ def build_envelope(
 ) -> ArrivalEnvelope:
     """Producer-facing factory: computes doc_id, applies default-deny, validates."""
     try:
+        doc_id = compute_doc_id(source, blob_path)
+    except IdentityInvalid as exc:
+        raise _wrap_identity_error(exc) from exc
+    try:
         return ArrivalEnvelope(
-            doc_id=compute_doc_id(source, blob_path),
+            doc_id=doc_id,
             source=source,
             blob_path=blob_path,
             vertical=vertical,
@@ -132,6 +140,11 @@ def build_envelope(
         )
     except ValidationError as exc:
         raise _wrap_validation_error(exc) from exc
+
+
+def _wrap_identity_error(exc: IdentityInvalid) -> EnvelopeValidationError:
+    """Maps an IdentityInvalid from the identity module to the module's declared PERMANENT error."""
+    return EnvelopeValidationError([{"field": exc.field_name, "reason": exc.reason}])
 
 
 def envelope_to_json(envelope: ArrivalEnvelope) -> str:
