@@ -13,13 +13,23 @@ other, the envelope layer and identity layer could silently diverge in what they
 To close that gap, this LLD's rollout is explicitly scoped to touch **two** files, both covered
 below (§1, §3, §4, §7):
 - `ingestion/identity/derive.py` (new) — the canonical implementation.
-- `ingestion/envelope/model.py` (existing, REQ-001) — `compute_doc_id` is redefined to import
-  and delegate to `derive_doc_id`. Zero behavior change to the hash output; the function
-  signature and all REQ-001 call sites (`build_envelope`, `_verify_doc_id`) are unchanged, since
-  `_verify_doc_id` already calls `compute_doc_id` rather than inlining hash logic — it therefore
-  picks up the canonical implementation transitively once `compute_doc_id` delegates, with no
-  separate edit required to `_verify_doc_id`'s own code (only its docstring, to name the new
-  source of truth — see §1a).
+- `ingestion/envelope/model.py` (existing, REQ-001) — two changes, both shown in §1a as minimal
+  diffs against the actual current file, not a re-transcription of unrelated lines:
+  1. `compute_doc_id`'s body is redefined to delegate to `derive_doc_id`. Zero behavior change
+     to the hash output.
+  2. `build_envelope` is updated to catch `IdentityInvalid` around its `compute_doc_id` call and
+     translate it into `EnvelopeValidationError`/`ENVELOPE_INVALID`. This is required, not
+     optional: `compute_doc_id(source, blob_path)` is currently evaluated as a constructor
+     argument to `ArrivalEnvelope(...)`, i.e. *before* Pydantic's field validators run. Today
+     that call does no input validation of its own, so bad `source`/`blob_path` silently reaches
+     Pydantic and is caught there via `except ValidationError`. Once `compute_doc_id` delegates
+     to `derive_doc_id` (which does validate its inputs and raises `IdentityInvalid`, not
+     `pydantic.ValidationError`), that same `except ValidationError` clause would no longer
+     catch it, letting `IdentityInvalid`/`IDENTITY_INVALID` escape uncaught in place of the
+     documented `EnvelopeValidationError`/`ENVELOPE_INVALID`. §1a fixes this at the same time as
+     the delegation, not as a follow-up.
+  `_verify_doc_id` (used by `envelope_from_json`'s parse path) needs no change beyond its
+  docstring — see §1a for why that path is already safe.
 
 ## 1. Interfaces
 
@@ -87,26 +97,87 @@ implement algorithms; this module *is* the algorithm that adapters and store imp
 
 ### 1a. Cross-module change: ingestion/envelope/model.py (REQ-001, modified by this LLD)
 
-```python
-# ingestion/envelope/model.py  (existing file — modified as part of this LLD's rollout)
+The blocks below are minimal diffs against the actual current file content (re-verified from
+disk). Only the lines shown change; every other line, docstring, import, and parameter in
+`ingestion/envelope/model.py` — including `EnvelopeValidationError.__init__(self, field_errors:
+list[dict[str, str]])` (no `code` constructor kwarg; `code`/`classification` are fixed class
+attributes) and `build_envelope`'s existing `received_at=received_at if received_at is not None
+else datetime.now(timezone.utc)` default (tz-aware, per REQ-001) — is untouched by this LLD.
 
-from ingestion.identity.derive import derive_doc_id
+**Change 1 — `compute_doc_id` delegates to the canonical implementation.** Add the import and
+replace only the function body:
+
+```python
+from ingestion.identity.derive import derive_doc_id, IdentityInvalid
 
 
 def compute_doc_id(source: str, blob_path: str) -> str:
-    """doc_id = sha256(source + blob_path), per Contract #2.
-    Delegates to the canonical implementation in ingestion.identity.derive (REQ-002); this
-    module no longer contains its own hashing logic. Zero behavior change to the hash output —
-    signature and return value are unchanged, so build_envelope and the _verify_doc_id model
-    validator (both REQ-001) require no further edits beyond this delegation."""
+    """doc_id = sha256(source + blob_path), per Contract #2. Pure, deterministic.
+    Delegates to the canonical implementation in ingestion.identity.derive (REQ-002)."""
     return derive_doc_id(source, blob_path)
 ```
 
-`ArrivalEnvelope._verify_doc_id`'s docstring (REQ-001 §1) is updated to note that it re-derives
-via `compute_doc_id`, which is now itself a thin delegate to `derive_doc_id` — the model
-validator's own code and control flow are unchanged; only the comment naming the ultimate source
-of truth is updated. This closes the divergence risk: there is exactly one place
-(`ingestion/identity/derive.py::derive_doc_id`) where the `doc_id` hash is actually computed.
+(The module's `import hashlib` becomes unused once this delegation lands, since `compute_doc_id`
+was its only caller — safe to remove, but not required for correctness.)
+
+**Change 2 — `build_envelope` translates `IdentityInvalid` into `EnvelopeValidationError`**, and
+a new helper `_wrap_identity_error` is added near the existing `_wrap_validation_error`. Only the
+`doc_id=compute_doc_id(...)` line moves out of the `ArrivalEnvelope(...)` call into its own
+statement above the existing `try`; every other line of `build_envelope` (docstring, parameters,
+`allowed_groups`/`received_at` defaults, the second `try`/`except ValidationError` block) is
+unchanged:
+
+```python
+def build_envelope(
+    *,
+    source: str,
+    blob_path: str,
+    content_hash: str,
+    trust_tier: TrustTier,
+    allowed_groups: list[str] | None = None,
+    vertical: str | None = None,
+    scenario_id: str | None = None,
+    received_at: datetime | None = None,
+) -> ArrivalEnvelope:
+    """Producer-facing factory: computes doc_id, applies default-deny, validates."""
+    try:
+        doc_id = compute_doc_id(source, blob_path)
+    except IdentityInvalid as exc:
+        raise _wrap_identity_error(exc) from exc
+    try:
+        return ArrivalEnvelope(
+            doc_id=doc_id,
+            source=source,
+            blob_path=blob_path,
+            vertical=vertical,
+            scenario_id=scenario_id,
+            allowed_groups=allowed_groups if allowed_groups is not None else [],
+            trust_tier=trust_tier,
+            content_hash=content_hash,
+            received_at=received_at if received_at is not None else datetime.now(timezone.utc),
+        )
+    except ValidationError as exc:
+        raise _wrap_validation_error(exc) from exc
+
+
+def _wrap_identity_error(exc: IdentityInvalid) -> EnvelopeValidationError:
+    """Maps an IdentityInvalid from the identity module to the module's declared PERMANENT error."""
+    return EnvelopeValidationError([{"field": exc.field_name, "reason": exc.reason}])
+```
+
+`_verify_doc_id` (invoked by `envelope_from_json`'s `model_validator(mode="after")`) needs no
+equivalent fix: it already runs *after* all per-field Pydantic validators have passed (`mode=
+"after"`), so `source`/`blob_path` are guaranteed non-empty strings by the time it calls
+`compute_doc_id(self.source, self.blob_path)` — `derive_doc_id`'s own input validation can never
+trigger on that path, only its hash-mismatch check can fail, which `_verify_doc_id` already
+handles by raising `ValueError` (unchanged, per REQ-001). Only `_verify_doc_id`'s docstring is
+updated to name `derive_doc_id` as the ultimate source of truth — no code change.
+
+This closes the divergence risk end-to-end: there is exactly one place
+(`ingestion/identity/derive.py::derive_doc_id`) where the `doc_id` hash is actually computed, and
+exactly one error code (`ENVELOPE_INVALID`) ever crosses the `ingestion.envelope.model` public
+boundary, regardless of which internal path (`build_envelope` vs. `envelope_from_json`) a
+malformed input takes.
 
 ## 2. Data model
 
@@ -123,6 +194,12 @@ row.
 Produced values (`doc_id`, `chunk_id`) are plain `str` — 64-character lowercase hex digests —
 consumed as primary/foreign keys by the State Ledger (REQ-003) and by store adapters (later
 phases); no schema for those consumers is defined here.
+
+`EnvelopeValidationError` (REQ-001, `ingestion/envelope/model.py`) is unchanged: `code` and
+`classification` remain fixed class attributes (`"ENVELOPE_INVALID"`, `"PERMANENT"`), and its
+constructor remains `__init__(self, field_errors: list[dict[str, str]])` — no `code` kwarg. §1a's
+`_wrap_identity_error` only adds a new *caller* of this existing constructor, passing a single
+`field_errors` entry built from `IdentityInvalid.field_name`/`reason`.
 
 ## 3. Sequence
 
@@ -143,7 +220,9 @@ phases); no schema for those consumers is defined here.
 8. Store adapters (out of scope) use the resulting `doc_id`/`chunk_id` values as upsert keys
    (Contract #2) — this module has no visibility into that write.
 
-**Failure paths** (all resolve to `IdentityInvalid(code="IDENTITY_INVALID", classification="PERMANENT")`)
+**Failure paths** (all resolve to `IdentityInvalid(code="IDENTITY_INVALID", classification="PERMANENT")`
+unless the call originated inside `build_envelope`, in which case §1a Change 2 translates it to
+`EnvelopeValidationError` with fixed `code == "ENVELOPE_INVALID"` before it reaches the caller)
 - F1. `source` is `None`, non-`str`, or empty (`""`) → `IdentityInvalid`, `field_name="source"`.
 - F2. `blob_path` is `None`, non-`str`, or empty (`""`) → `IdentityInvalid`, `field_name="blob_path"`.
 - F3. `doc_id` passed into `derive_chunk_id`/`derive_chunk_ids_batch` fails `validate_id_format`
@@ -158,6 +237,12 @@ phases); no schema for those consumers is defined here.
 - F7. `validate_id_format` called directly (by an external caller, not via derive_*) on a
   malformed id string → `IdentityInvalid`, `field_name` set to the caller-supplied `field_name`
   (default `"id"`).
+- F8 (cross-module, `ingestion/envelope/model.py`). `build_envelope` called with an empty/`None`
+  `source` or `blob_path` → `derive_doc_id` raises `IdentityInvalid` (F1/F2 above) at the
+  `compute_doc_id(source, blob_path)` call site → `build_envelope`'s `except IdentityInvalid`
+  clause (§1a Change 2) catches it and raises `EnvelopeValidationError([{"field":
+  "source"|"blob_path", "reason": ...}])` (fixed `code == "ENVELOPE_INVALID"`) — the caller never
+  observes `IdentityInvalid`/`IDENTITY_INVALID` from this entry point.
 
 ## 4. Contract compliance
 
@@ -179,7 +264,11 @@ phases); no schema for those consumers is defined here.
 - **Failure Taxonomy**: every failure path in §3 raises `IdentityInvalid` classified PERMANENT —
   malformed identity inputs indicate a caller/producer bug (never a flaky external dependency),
   so retrying without a code fix would never succeed; there is no TRANSIENT path in this module
-  because it makes no external calls.
+  because it makes no external calls. §1a Change 2 additionally ensures the taxonomy stays
+  correctly *scoped* at module boundaries: `IDENTITY_INVALID` never leaks out of
+  `ingestion.envelope.model`'s public functions (`build_envelope`, `envelope_from_json`) — those
+  continue to only ever raise the module's own documented code, `ENVELOPE_INVALID`, matching
+  REQ-001's contract even though the underlying hash logic now lives elsewhere.
 
 ## 5. Error codes
 
@@ -190,6 +279,7 @@ phases); no schema for those consumers is defined here.
 | `IDENTITY_INVALID` | PERMANENT | `doc_id` input to `derive_chunk_id`/`derive_chunk_ids_batch`/`validate_id_format` is not a 64-char lowercase hex string |
 | `IDENTITY_INVALID` | PERMANENT | `chunk_index` is not an `int`, or is a `bool` |
 | `IDENTITY_INVALID` | PERMANENT | `chunk_index` is a negative `int` |
+| `ENVELOPE_INVALID` (cross-module, `ingestion/envelope/model.py`) | PERMANENT | `build_envelope` called with empty/`None`/non-`str` `source` or `blob_path` — `IdentityInvalid` from `compute_doc_id` is caught and translated (§1a Change 2), never surfaced as `IDENTITY_INVALID` |
 
 No TRANSIENT codes originate in this module — pure in-process hashing has no external call to
 fail transiently.
@@ -214,6 +304,10 @@ safety-critical, contract-defining invariant (Contract #2) — a config edit alo
 able to change how `doc_id`/`chunk_id` are computed, since that would silently break
 idempotency for every document already indexed under the old scheme. Changing the algorithm
 requires a code change and a new LLD/PR.
+
+`config/envelope.yaml`'s existing `error_codes: { ENVELOPE_INVALID: PERMANENT }` entry (REQ-001)
+is unchanged — §1a Change 2 does not introduce a new error code, it only ensures an existing one
+is emitted from a path that would otherwise have leaked a different module's code.
 
 ## 7. Test plan
 
@@ -263,6 +357,19 @@ requires a code change and a new LLD/PR.
   ingestion.identity.derive.derive_doc_id(s, p)`, byte-for-byte. This is the explicit test/CI
   signal the scope note above calls for — it fails loudly if the two modules are ever edited
   independently and drift apart.
+- `test_build_envelope_empty_source_raises_envelope_validation_error` — cross-module regression
+  guard (lives alongside `ingestion/envelope/model.py`'s existing REQ-001 tests):
+  `build_envelope(source="", blob_path=..., ...)` raises `EnvelopeValidationError` with
+  `code == "ENVELOPE_INVALID"` and a `field_errors` entry naming `"source"` — explicitly *not*
+  `IdentityInvalid`/`"IDENTITY_INVALID"`. Guards §1a Change 2.
+- `test_build_envelope_empty_blob_path_raises_envelope_validation_error` — same as above for
+  `blob_path=""`, asserting `EnvelopeValidationError`/`ENVELOPE_INVALID` with a `field_errors`
+  entry naming `"blob_path"`, not `IdentityInvalid`/`"IDENTITY_INVALID"`. Guards §1a Change 2.
+- `test_build_envelope_default_received_at_is_tz_aware_utc` — regression guard for §1a Change 2's
+  minimal-diff claim: `build_envelope(...)` called with `received_at` omitted produces an
+  envelope whose `received_at.tzinfo is not None` (UTC-aware), confirming the existing
+  `datetime.now(timezone.utc)` default (REQ-001) was left untouched by this LLD's edit and did
+  not regress to a naive `datetime.utcnow()`.
 
 ## 8. Budget
 

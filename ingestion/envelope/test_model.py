@@ -15,6 +15,7 @@ from ingestion.envelope.model import (
     envelope_from_json,
     envelope_to_json,
 )
+from ingestion.identity.derive import derive_doc_id
 
 VALID_CONTENT_HASH = "a" * 64
 
@@ -283,3 +284,59 @@ def test_direct_model_construction_still_valid() -> None:
         received_at=datetime(2026, 7, 20, 12, 0, 0, tzinfo=timezone.utc),
     )
     assert env.allowed_groups == []
+
+
+# --- REQ-002 cross-module regression guards (Contract #2 drift protection) -----------
+
+
+@pytest.mark.parametrize(
+    "source,blob_path",
+    [
+        ("confluence", "spaces/eng/page-42"),
+        ("s3", "bucket/key.pdf"),
+        ("sharepoint", "sites/hr/doc-1"),
+        ("a", "b"),
+        ("x" * 500, "y" * 500),
+    ],
+)
+def test_compute_doc_id_delegates_to_derive_doc_id(source: str, blob_path: str) -> None:
+    """Guards against the two doc_id implementations silently diverging (REQ-002 §1a)."""
+    assert compute_doc_id(source, blob_path) == derive_doc_id(source, blob_path)
+
+
+def test_build_envelope_empty_source_raises_envelope_validation_error() -> None:
+    with pytest.raises(EnvelopeValidationError) as exc_info:
+        build_envelope(
+            source="",
+            blob_path="spaces/eng/page-42",
+            content_hash=VALID_CONTENT_HASH,
+            trust_tier=TrustTier.PUBLIC,
+        )
+    err = exc_info.value
+    assert err.code == "ENVELOPE_INVALID"
+    assert err.classification == "PERMANENT"
+    assert "source" in _field_names(err.field_errors)
+
+
+def test_build_envelope_empty_blob_path_raises_envelope_validation_error() -> None:
+    with pytest.raises(EnvelopeValidationError) as exc_info:
+        build_envelope(
+            source="confluence",
+            blob_path="",
+            content_hash=VALID_CONTENT_HASH,
+            trust_tier=TrustTier.PUBLIC,
+        )
+    err = exc_info.value
+    assert err.code == "ENVELOPE_INVALID"
+    assert err.classification == "PERMANENT"
+    assert "blob_path" in _field_names(err.field_errors)
+
+
+def test_build_envelope_default_received_at_is_tz_aware_utc() -> None:
+    env = build_envelope(
+        source="confluence",
+        blob_path="spaces/eng/page-42",
+        content_hash=VALID_CONTENT_HASH,
+        trust_tier=TrustTier.PUBLIC,
+    )
+    assert env.received_at.tzinfo is not None
