@@ -367,8 +367,12 @@ class LedgerStore(ABC):
             doc_id: 64-char lowercase hex identifier (REQ-002).
             to_status: Requested target status.
             stage: Requested stage; must equal ``to_status`` (Assumption A1).
-            error_code: Error code to record; required if ``to_status == Status.FAILED``.
-            error_message: Optional human-readable error message to record.
+            error_code: Error code to record; required if ``to_status == Status.FAILED``. On
+                a same-status retry (``to_status == current.status``), passing ``None``
+                preserves the row's existing ``last_error_code``/``last_error_message``
+                rather than clearing them; passing a value overwrites both (Assumption A5).
+            error_message: Optional human-readable error message to record; see
+                ``error_code`` for same-status-retry preservation behavior.
 
         Returns:
             The new ``LedgerRow`` after the transition is applied.
@@ -467,13 +471,16 @@ class InMemoryLedgerStore(LedgerStore):
             current = self._rows.get(doc_id)
             validate_transition(doc_id, current, to_status, stage, error_code)
             assert current is not None  # validate_transition raises above when None
+            new_last_error_code, new_last_error_message = _next_error_fields(
+                current, to_status, error_code, error_message
+            )
             new_row = LedgerRow(
                 doc_id=doc_id,
                 status=to_status,
                 stage=stage,
                 attempts=_next_attempts(current, to_status),
-                last_error_code=error_code,
-                last_error_message=error_message,
+                last_error_code=new_last_error_code,
+                last_error_message=new_last_error_message,
                 config_version=current.config_version,
                 ingested_at=current.ingested_at,
                 updated_at=datetime.now(timezone.utc),
@@ -513,3 +520,30 @@ def _next_attempts(current: LedgerRow, to_status: Status) -> int:
     if to_status == current.status:
         return current.attempts + 1
     return 1
+
+
+def _next_error_fields(
+    current: LedgerRow,
+    to_status: Status,
+    error_code: str | None,
+    error_message: str | None,
+) -> tuple[str | None, str | None]:
+    """Computes the new ``last_error_code``/``last_error_message`` pair, per Assumption A5.
+
+    Args:
+        current: The row before the transition is applied.
+        to_status: The requested target status.
+        error_code: Error code supplied by the caller, if any.
+        error_message: Error message supplied by the caller, if any.
+
+    Returns:
+        ``(current.last_error_code, current.last_error_message)`` unchanged when this is a
+        same-status retry (``to_status == current.status``) and no new ``error_code`` was
+        supplied — the prior error remains visible via ``get()`` rather than being cleared
+        by the retry attempt itself. Otherwise, ``(error_code, error_message)`` as supplied
+        by the caller — clearing on a clean forward advance with no ``error_code``, or
+        overwriting whenever a new ``error_code`` is explicitly supplied.
+    """
+    if to_status == current.status and error_code is None:
+        return current.last_error_code, current.last_error_message
+    return error_code, error_message

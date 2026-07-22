@@ -323,6 +323,24 @@ def test_last_error_cleared_on_clean_forward_advance() -> None:
     assert clean.last_error_message is None
 
 
+def test_last_error_preserved_on_same_status_retry_without_error_code() -> None:
+    store = InMemoryLedgerStore()
+    doc_id = _new_doc_id("error-preserved")
+    _build_row_at(store, doc_id, Status.ANALYZING)
+    stale = store.transition(
+        doc_id,
+        Status.ANALYZING,
+        Status.ANALYZING,
+        error_code="TRANSIENT_X",
+        error_message="transient failure",
+    )
+    assert stale.last_error_code == "TRANSIENT_X"
+    assert stale.last_error_message == "transient failure"
+    retried = store.transition(doc_id, Status.ANALYZING, Status.ANALYZING)
+    assert retried.last_error_code == "TRANSIENT_X"
+    assert retried.last_error_message == "transient failure"
+
+
 # --- get() ---------------------------------------------------------------------------
 
 
