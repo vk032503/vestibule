@@ -71,9 +71,11 @@ scoped design decisions, documented here, not open questions that block the LLD:
   `failed` (failure is the terminal outcome of the attempts already made, not itself a retry).
 - **A5 — `last_error_code`/`last_error_message` on non-`failed` transitions.** Cleared to `None`
   on a clean forward advance with no `error_code` supplied (the new stage starts error-free);
-  overwritten if `error_code`/`error_message` are supplied on a self-transition retry (A2), so an
-  in-progress stage's last transient failure remains visible via `get()` even though the row
-  hasn't reached `failed`.
+  overwritten if `error_code`/`error_message` are supplied on a self-transition retry (A2). If a
+  self-transition retry (A2) supplies no `error_code` (i.e. `error_code=None`), the row's prior
+  `last_error_code`/`last_error_message` are preserved unchanged, not cleared — so an in-progress
+  stage's last transient failure remains visible via `get()` across a bare retry, even though the
+  row hasn't reached `failed`.
 - **A6 — `doc_id` format is validated in `create()`/`transition()`, not `get()`.** This module
   reuses `ingestion.identity.derive.validate_id_format` (REQ-002) rather than re-implementing a
   hex-shape check, so `create()`/`transition()` reject a malformed `doc_id` as `IdentityInvalid`
