@@ -2,6 +2,40 @@
 
 **Story:** docs/stories/REQ-003.md · **Phase:** 1 · **Pipeline:** full
 
+## Revision note
+Revised twice after design-review REJECTs, both rounds confined to the concurrency/PERMANENT
+semantics fix for `LedgerTransitionInvalid` — **no `LedgerStore` method signature has changed in
+either round** (`create`/`transition`/`get`/`list_by_status` remain exactly as given by the story).
+
+**Round 1** — three findings:
+1. **[MAJOR]** A losing caller in a concurrent `transition()` race (§3 F7) raised
+   `LedgerTransitionInvalid` with no way to distinguish "benign lost race under at-least-once
+   delivery" from "real corruption," which — read literally against Contract #4's "PERMANENT means
+   mark failed, never retry" — would spuriously fail a document that is actually progressing
+   correctly via the winner. Fixed by enriching the exception with the observed current row and
+   the caller's own attempted request (§1), adding a pure `is_benign_concurrent_loss()` triage
+   helper (§1), and adding explicit caller guidance in §3/§4.
+2. **[MINOR]** `config/ledger.yaml`'s `default_list_limit` was bundled into the same "config edit
+   must never change behavior" carve-out as `legal_transitions`. Un-bundled in §6, with a
+   sync-check test added in §7. Confirmed resolved on re-review; unchanged in Round 2.
+3. **[MINOR]** Added an explicit one-line acknowledgment (§4, §8) that `attempts` has no
+   ledger-enforced retry cap. Confirmed resolved on re-review; unchanged in Round 2.
+
+**Round 2 (this revision)** — one narrow gap inside Round 1's fix for finding #1:
+`is_benign_concurrent_loss`'s reachability check indexed `attempted_to_status` into
+`_FORWARD_ORDER`, but `_FORWARD_ORDER` deliberately excludes `Status.FAILED` — and
+`attempted_to_status` can legitimately *be* `Status.FAILED` (a losing caller racing to mark a
+document `FAILED` while a concurrent winner simultaneously advances it forward, e.g. to
+`INDEXED`, is a reachable, legal scenario, not a contrived one). As specified, this crashed the
+triage helper itself (`tuple.index()` raises `ValueError` for a value not present) on exactly the
+input it exists to handle safely, and — because that crash occurred before the helper could return
+`True` — the surrounding F7 decision tree would have driven a document that actually succeeded
+toward an erroneous `failed`-mark attempt. Fixed by giving `is_benign_concurrent_loss` an explicit,
+order-dependent special case for `attempted_to_status == Status.FAILED` that never reaches the
+`_FORWARD_ORDER` lookup for that value (§1), updating §3 F7's caller-guidance steps to match, and
+adding regression tests, including one that exhaustively exercises every `(attempted_to_status,
+observed_row.status)` pair to assert the helper never raises (§7).
+
 ## Assumptions (non-blocking, flagged per house rules)
 The story specifies the four `LedgerStore` methods, the `Status` values, and the legal-transition
 table fully enough to design against, but leaves several details underspecified. None of these
@@ -81,6 +115,23 @@ References table. Same-status self-transitions (retry-within-stage, Assumption A
 legal for every non-terminal status and are validated separately in validate_transition,
 not folded into this dict, so this table stays a literal match to the story's spec."""
 
+_FORWARD_ORDER: tuple[Status, ...] = (
+    Status.PENDING, Status.ANALYZING, Status.CHUNKING,
+    Status.EMBEDDING, Status.INDEXING, Status.INDEXED,
+)
+"""The single linear non-FAILED path through _LEGAL_TRANSITIONS, precomputed for
+is_benign_concurrent_loss's reachability check (§1, below) — this FSM has exactly one
+forward branch (every status's only non-FAILED successor is the next entry here), so
+"reachable via zero or more further legal forward edges" reduces to a list-index
+comparison rather than a graph search.
+
+Status.FAILED is deliberately absent: it is legal from every non-terminal status (see
+_LEGAL_TRANSITIONS), not part of this single linear path, so it has no well-defined
+position here. Any code indexing into this tuple MUST special-case both
+`attempted_to_status == Status.FAILED` and `observed_row.status == Status.FAILED` before
+calling .index() on either — is_benign_concurrent_loss (below) does exactly this, having
+been fixed in a design-review round to no longer call .index(Status.FAILED)."""
+
 
 class LedgerRow(BaseModel):
     """One row per document — Contract #3. Immutable snapshot; store methods return a
@@ -107,16 +158,102 @@ class EnvelopeSummary:
 
 class LedgerTransitionInvalid(Exception):
     """Raised for any illegal state transition or malformed transition request. Always
-    PERMANENT — an illegal transition indicates a caller/coordinator bug (wrong stage
-    order, missing error_code, stale doc_id), never a transient condition."""
+    classified PERMANENT at the exception-class level (code + classification below are
+    fixed, never caller-supplied) — an illegal transition indicates a caller/coordinator
+    bug (wrong stage order, stale doc_id, missing error_code) in the general case.
+
+    IMPORTANT — concurrency (§3 F7, §4): under Contract #2's at-least-once-delivery
+    assumption, this same exception is also raised for the *losing* caller of a benign,
+    expected concurrent transition() race — that is not evidence of corruption. Rather
+    than requiring a catching caller to issue a second get(doc_id) (races a second time,
+    and reads a possibly-already-changed-again row — a TOCTOU gap), this exception carries
+    the row observed at raise time plus the caller's own original request, so
+    is_benign_concurrent_loss() (below) can triage deterministically from the exception
+    alone. See §3/§4 for the required caller-side handling before treating this exception
+    as a document failure.
+    """
     code: str = "LEDGER_TRANSITION_INVALID"
     classification: Literal["PERMANENT"] = "PERMANENT"
 
-    def __init__(self, doc_id: str, reason: str) -> None:
-        """code and classification are fixed by this class, not caller-supplied."""
+    def __init__(
+        self,
+        doc_id: str,
+        reason: str,
+        *,
+        observed_row: LedgerRow | None,
+        attempted_to_status: Status,
+        attempted_stage: Status,
+    ) -> None:
+        """code and classification are fixed by this class, not caller-supplied.
+        observed_row: the current row read (under the store's lock, so it reflects
+        whatever write — if any — a concurrent winner already applied) at the moment this
+        exception is raised; None only for F2 (no row exists for doc_id at all — nothing to
+        observe). attempted_to_status/attempted_stage: the caller's own original request,
+        always present regardless of observed_row, so is_benign_concurrent_loss() never
+        needs anything beyond this exception's own attributes."""
         self.doc_id = doc_id
         self.reason = reason
+        self.observed_row = observed_row
+        self.attempted_to_status = attempted_to_status
+        self.attempted_stage = attempted_stage
         super().__init__(f"{doc_id}: {reason}")
+
+
+def is_benign_concurrent_loss(
+    observed_row: LedgerRow | None,
+    attempted_to_status: Status,
+    attempted_stage: Status,
+) -> bool:
+    """Pure, backend-independent triage helper for a caller that has caught
+    LedgerTransitionInvalid (§3 F7, §4). Intended call pattern:
+    `is_benign_concurrent_loss(exc.observed_row, exc.attempted_to_status, exc.attempted_stage)`
+    — no extra get(doc_id) needed, no TOCTOU gap. Never raises, for any input — see the
+    ordered checks below, and the Round 2 regression test in §7.
+
+    Evaluated in this exact order (each step either returns or falls through to the next):
+      1. `attempted_stage != attempted_to_status` → False (malformed request, A1).
+      2. `observed_row is None` → False (F2, unknown doc_id — nothing to observe).
+      3. `observed_row.status != observed_row.stage` → False (observed row itself
+         inconsistent; should be unreachable in practice given store invariants —
+         defensive only).
+      4. `attempted_to_status == Status.FAILED` — checked and fully resolved HERE, before
+         any `_FORWARD_ORDER.index()` call, because `Status.FAILED` is deliberately absent
+         from `_FORWARD_ORDER` (§1) and is a legal target from every non-terminal status —
+         so a losing caller racing to mark `FAILED` while a concurrent winner
+         simultaneously advances the document forward (e.g. to `INDEXED`) is a reachable,
+         legitimate scenario, not a contrived edge case (this is the exact bug fixed in
+         design-review Round 2 — see the Revision note):
+           - `observed_row.status == Status.INDEXED` → **True**. The document already
+             reached the other terminal state via the winner; forcing this caller's
+             `FAILED` mark through would be both impossible (F4 rejects writes against an
+             already-terminal row) and semantically wrong, since the document actually
+             succeeded.
+           - Any other `observed_row.status` here (including `Status.FAILED` itself, and
+             including every non-terminal/mid-pipeline status) → **False**. An observed
+             `Status.FAILED` is a distinct, separately-handled outcome — see §3 F7 step 2
+             — deliberately NOT reported as "benign" by this helper. An observed
+             non-terminal/mid-pipeline status means this caller's own reason for
+             attempting `FAILED` does not correspond to any legitimate concurrent-progress
+             story, so it is a genuine conflict, treated as a real bug per §3 F7 step 3.
+      5. (Reached only when `attempted_to_status != Status.FAILED`, i.e. it is one of the
+         five non-`FAILED` values, all always present in `_FORWARD_ORDER`.)
+         `observed_row.status == Status.FAILED` → False. A concurrent real failure — a
+         distinct case, see §3 F7 step 2, deliberately NOT reported as benign here either.
+      6. Otherwise (both `attempted_to_status` and `observed_row.status` are now guaranteed
+         members of `_FORWARD_ORDER` — step 4 has already returned for
+         `attempted_to_status == Status.FAILED`; step 5 has already returned for
+         `observed_row.status == Status.FAILED` — so the following can never raise
+         `ValueError`): **True** iff `_FORWARD_ORDER.index(observed_row.status) >=
+         _FORWARD_ORDER.index(attempted_to_status)` — i.e. a concurrent winner already
+         applied this exact edge, or has since advanced the document even further along
+         the same single linear path (late redelivery). Otherwise **False**.
+
+    In every False case, the caller must NOT treat this return value alone as "real
+    PERMANENT failure" — this helper is step 1 of §3 F7's full three-step decision tree;
+    step 2 separately (and unconditionally) handles `observed_row.status == Status.FAILED`
+    regardless of what the caller itself attempted; only step 3, the remainder, is a
+    genuine bug."""
+    ...
 
 
 def validate_transition(
@@ -129,17 +266,21 @@ def validate_transition(
     implementation (in-memory now; Azure Table Storage / Cosmos DB in Phase 2, out of
     scope) so the legal-transition table is enforced exactly once, per house rules'
     "adapters thin" principle — future backends call this rather than reimplementing it.
-    No I/O, no mutation. Raises LedgerTransitionInvalid; returns None on success.
-    Checks, in order: current is not None (F2); stage == to_status (F1); current.status
-    is not terminal (F4); to_status is in _LEGAL_TRANSITIONS[current.status] or
-    to_status == current.status (A2) (F3); if to_status == Status.FAILED, error_code is
-    not None (F5)."""
+    No I/O, no mutation. Checks, in order: current is not None (F2); stage == to_status
+    (F1); current.status is not terminal (F4); to_status is in
+    _LEGAL_TRANSITIONS[current.status] or to_status == current.status (A2) (F3); if
+    to_status == Status.FAILED, error_code is not None (F5). On any failure, raises
+    LedgerTransitionInvalid(doc_id, reason, observed_row=current, attempted_to_status=
+    to_status, attempted_stage=stage) — current is threaded straight through as
+    observed_row so every raise site is triage-ready via is_benign_concurrent_loss()
+    without extra I/O. Returns None on success."""
     ...
 
 
 class LedgerStore(ABC):
     """Persistence port for Contract #3. Concrete backends implement all four methods,
-    each calling validate_transition() before any write."""
+    each calling validate_transition() before any write, passing the current in-store row
+    (read under whatever locking the backend uses) as validate_transition's `current`."""
 
     @abstractmethod
     def create(self, doc_id: str, envelope_summary: EnvelopeSummary) -> LedgerRow:
@@ -157,9 +298,10 @@ class LedgerStore(ABC):
         error_code: str | None = None,
         error_message: str | None = None,
     ) -> LedgerRow:
-        """Calls validate_transition() first, then writes and returns the new row.
-        Raises LedgerTransitionInvalid (PERMANENT, §3/§5) or, cross-module,
-        IdentityInvalid (PERMANENT, §5) if doc_id is malformed."""
+        """Calls validate_transition() first, then writes and returns the new row. Raises
+        LedgerTransitionInvalid (PERMANENT, §3/§5 — see is_benign_concurrent_loss() and
+        §4 for required caller triage before treating this as a document failure) or,
+        cross-module, IdentityInvalid (PERMANENT, §5) if doc_id is malformed."""
         ...
 
     @abstractmethod
@@ -171,7 +313,9 @@ class LedgerStore(ABC):
     @abstractmethod
     def list_by_status(self, status: Status, limit: int = 100) -> list[LedgerRow]:
         """Rows with the given status, ordered by updated_at descending, capped at
-        limit (AC7). limit <= 0 returns an empty list; never raises."""
+        limit (AC7). limit <= 0 returns an empty list; never raises. limit's literal
+        default (100) is the documented, sync-checked counterpart of config/ledger.yaml's
+        default_list_limit — see §6."""
         ...
 
 
@@ -182,7 +326,12 @@ class InMemoryLedgerStore(LedgerStore):
     throughput-optimized — acceptable given the in-memory, test/dev-only scope and the
     <5ms budget, §8)."""
 
-    def __init__(self) -> None: ...
+    def __init__(self, *, default_list_limit: int = 100) -> None:
+        """default_list_limit is accepted for forward compatibility with a future
+        composition root that reads config/ledger.yaml and wires it in explicitly (§6);
+        it does not change list_by_status's own `limit: int = 100` default parameter,
+        which remains the story's given, always-effective default for direct callers."""
+        ...
 
     def create(self, doc_id: str, envelope_summary: EnvelopeSummary) -> LedgerRow: ...
 
@@ -202,9 +351,9 @@ class InMemoryLedgerStore(LedgerStore):
 
 No adapter classes are introduced. `LedgerStore` is the persistence port itself (Phase-2 Azure
 Table/Cosmos adapters, out of scope, will be the thin wrappers, each reusing `validate_transition`
-rather than reimplementing the FSM). This module depends only on
-`ingestion.identity.derive.validate_id_format` (REQ-002, for `doc_id` shape checks per A6) and the
-standard library (`threading`, `dataclasses`, `enum`) — it does not import
+and `is_benign_concurrent_loss` rather than reimplementing the FSM or the race-triage logic). This
+module depends only on `ingestion.identity.derive.validate_id_format` (REQ-002, for `doc_id` shape
+checks per A6) and the standard library (`threading`, `dataclasses`, `enum`) — it does not import
 `ingestion.envelope.model` (REQ-001), per Assumption A3.
 
 ## 2. Data model
@@ -215,7 +364,7 @@ standard library (`threading`, `dataclasses`, `enum`) — it does not import
 | `LedgerRow` | `doc_id` | `str` | PK, 64-char lowercase hex, validated via `validate_id_format` (REQ-002) |
 | | `status` | `Status` | current FSM state |
 | | `stage` | `Status` | mirror of `status` — see Assumption A1 |
-| | `attempts` | `int` | `>= 0`; semantics per Assumption A4 |
+| | `attempts` | `int` | `>= 0`; semantics per Assumption A4; **no ledger-enforced upper cap** — see §4 |
 | | `last_error_code` | `str \| None` | cleared/overwritten per Assumption A5 |
 | | `last_error_message` | `str \| None` | cleared/overwritten per Assumption A5 |
 | | `config_version` | `str` | from `EnvelopeSummary`; set once at `create()`, immutable |
@@ -223,12 +372,16 @@ standard library (`threading`, `dataclasses`, `enum`) — it does not import
 | | `updated_at` | `datetime` | UTC; set on every write (AC5) |
 | `EnvelopeSummary` | `config_version` | `str` | only field persisted into `LedgerRow` — Assumption A3 |
 | `LedgerTransitionInvalid` | `code` | `str` | `"LEDGER_TRANSITION_INVALID"` (fixed) |
-| | `classification` | `Literal["PERMANENT"]` | fixed |
+| | `classification` | `Literal["PERMANENT"]` | fixed at the exception-class level — see §1/§4 for caller-side triage before treating as a document failure |
 | | `doc_id` | `str` | constructor param |
 | | `reason` | `str` | constructor param, human-readable |
+| | `observed_row` | `LedgerRow \| None` | current row at raise time; `None` only for F2 |
+| | `attempted_to_status` | `Status` | caller's own original `to_status` |
+| | `attempted_stage` | `Status` | caller's own original `stage` |
 
 `InMemoryLedgerStore`'s internal storage (`dict[str, LedgerRow]` + `threading.RLock`) is a private
-implementation detail, not part of the public data model.
+implementation detail, not part of the public data model. `_FORWARD_ORDER` (§1) is likewise a
+private module constant, not part of the public data model.
 
 ## 3. Sequence
 
@@ -257,11 +410,12 @@ implementation detail, not part of the public data model.
    calls `list_by_status(Status.INDEXED, limit=...)` to page through recently indexed documents,
    most-recently-updated first (AC7).
 
-**Failure paths** (all resolve to `LedgerTransitionInvalid(code="LEDGER_TRANSITION_INVALID",
-classification="PERMANENT")` unless noted)
+**Failure paths** (all raise `LedgerTransitionInvalid(code="LEDGER_TRANSITION_INVALID",
+classification="PERMANENT")` unless noted — see F7 for the required caller-side triage before
+any of these is treated as a document failure)
 - F1. `transition()` called with `stage != to_status` → rejected (A1's mirrored-pair invariant).
 - F2. `transition()` called for a `doc_id` with no prior `create()` row → rejected ("unknown
-  doc_id"); no row is created as a side effect.
+  doc_id"); no row is created as a side effect; `observed_row=None`.
 - F3. `to_status` is not in `_LEGAL_TRANSITIONS[current.status]` and `to_status != current.status`
   → rejected ("illegal transition from X to Y").
 - F4. `transition()` called on a row already `INDEXED` or `FAILED` → rejected ("no transitions out
@@ -274,9 +428,40 @@ classification="PERMANENT")` unless noted)
   non-`str`) → `IdentityInvalid` (REQ-002, `code="IDENTITY_INVALID"`, PERMANENT) propagates
   un-wrapped — cross-module, see §4/§5.
 - F7. Concurrent `transition()` calls race for the same `doc_id` on `InMemoryLedgerStore` →
-  serialized by the store's internal `RLock`; the losing caller observes the winner's
-  already-applied status and its own `to_status` is then evaluated as an ordinary F3/F4 legality
-  check against that new current state — never a torn/partial write (AC6).
+  serialized by the store's internal `RLock`; never a torn/partial write (AC6). The losing
+  caller's request is then evaluated as an ordinary F1/F3/F4/F5 legality check against the
+  winner's already-applied state; if illegal, `LedgerTransitionInvalid` is raised with
+  `observed_row` = the winner's now-current row and `attempted_to_status`/`attempted_stage` = the
+  loser's own original request (§1). Per Contract #2's at-least-once-delivery assumption, this is
+  an **expected, often-benign** outcome, not automatically a real failure — a coordinator MUST NOT
+  treat every `LedgerTransitionInvalid` raised here as "mark document failed" without first
+  triaging it:
+  1. Call `is_benign_concurrent_loss(exc.observed_row, exc.attempted_to_status,
+     exc.attempted_stage)`. If **True** — the winner already applied the identical edge this
+     caller wanted, has since advanced the document even further along the same linear path
+     (late redelivery), OR — the `attempted_to_status == Status.FAILED` special case, §1, fixed in
+     design-review Round 2 — the document already reached `INDEXED` via a concurrent winner while
+     this caller was racing to mark it `FAILED` — the coordinator acks the triggering message and
+     takes no further action; the document is progressing, or has already progressed, correctly,
+     and no ledger write was lost.
+  2. Else, if `exc.observed_row is not None and exc.observed_row.status == Status.FAILED` — the
+     document has already been terminally failed via a different concurrent path. This applies
+     **regardless of whether this caller was itself attempting `FAILED` or something else** — a
+     losing caller that was itself racing to independently mark `FAILED` while a different
+     concurrent path already did so is exactly as benign an outcome as any other case here (see
+     §1 step 5, which deliberately does not report it as "True" from
+     `is_benign_concurrent_loss`, precisely so it is caught here, uniformly, instead). The
+     coordinator acks (re-processing a terminal `doc_id` can never succeed regardless of who
+     caused it) but does not conflate this with case 1: a real failure occurred and remains
+     visible via `exc.observed_row.last_error_code`.
+  3. Otherwise — `is_benign_concurrent_loss` returned False and the observed state is not
+     `FAILED` — the exception reflects a genuine caller/coordinator bug: wrong stage order, stale
+     `doc_id`, stage/status mismatch, or — the scenario that motivated `is_benign_concurrent_loss`'s
+     `Status.FAILED` special case, §1 — a caller racing to mark `FAILED` while the observed row is
+     still non-terminal/mid-pipeline, an unresolved conflict rather than legitimate concurrent
+     progress. Handled per Contract #4's literal PERMANENT semantics: mark the document `failed`
+     (via a fresh `transition(..., to_status=FAILED, error_code="LEDGER_TRANSITION_INVALID", ...)`
+     call, itself subject to the same F1–F7 handling), ack, never retry.
 - F8. `list_by_status()` called with `limit <= 0` → returns `[]`; does not raise (boundary
   condition, not a taxonomy error).
 
@@ -291,21 +476,41 @@ classification="PERMANENT")` unless noted)
   `create()` is idempotent per AC1 — a repeat call under at-least-once delivery returns the
   existing row unchanged; every `transition()` write is a full-row replace keyed on `doc_id`, and
   F1–F5's validation ensures a redelivered/repeated call either succeeds identically as a
-  same-status retry (A2) or is rejected as a side-effect-free PERMANENT error — never silently
-  corrupting state under re-delivery.
+  same-status retry (A2) or is rejected as a side-effect-free error subject to F7's triage (below)
+  — never silently corrupting state under re-delivery, and never spuriously punishing a document
+  for the redelivery Contract #2 itself declares is normal.
 - **State Ledger: this module *is* Contract #3.** Exactly one `LedgerRow` per `doc_id`; the exact
   `pending → analyzing → chunking → embedding → indexing → indexed | failed` FSM from CLAUDE.md
   and the story's References table is enforced by `validate_transition` (not left to callers, per
   the story's explicit requirement); every transition records `stage`, `attempts`, `error_code`
-  (via `last_error_code`), and `updated_at`, with no silent state (F1–F5 reject every
-  unrecorded/ambiguous transition attempt rather than allowing a no-op write).
-- **Failure Taxonomy**: every failure in §3 resolves to `LedgerTransitionInvalid`, classified
-  PERMANENT — an illegal transition, stage/status mismatch, or missing `error_code` on `failed` is
-  a caller/coordinator bug, never worth blind retry; `config/ledger.yaml` declares this code per
-  house rules. The one cross-module exception (F6, `IdentityInvalid`/`IDENTITY_INVALID`) is
-  already classified PERMANENT by REQ-002, so no unclassified/default-TRANSIENT case exists in
-  this module. `InMemoryLedgerStore` makes no external call, so no TRANSIENT code originates here
-  (matches the story's explicit "in-memory implementation... has no external cost").
+  (via `last_error_code`), and `updated_at`, with no silent state — F1–F7 reject every
+  unrecorded/ambiguous/racing transition attempt rather than allowing a silent no-op or a torn
+  write, and F7 specifically is recorded and surfaced to the caller (via `observed_row`) rather
+  than swallowed, even in the benign case.
+- **Failure Taxonomy**: every failure in §3 raises `LedgerTransitionInvalid`, classified PERMANENT
+  at the exception-class level — that classification itself is never weakened or made conditional,
+  and "never blindly retry an illegal transition" always holds. What §3 F7 refines is a separate
+  question the story/CLAUDE.md do not explicitly address: whether raising this exception should,
+  as a side effect, cause the coordinator to mark the *document* `failed`. Under Contract #2's
+  explicit at-least-once assumption, a losing caller in a legitimate race is not evidence of a
+  caller/coordinator bug, so marking the document failed in that case would be a framework-induced
+  false failure, not a taxonomy-correct outcome. This module therefore enriches
+  `LedgerTransitionInvalid` with `observed_row`/`attempted_to_status`/`attempted_stage` (§1) and
+  provides `is_benign_concurrent_loss()` — including its explicit, crash-free
+  `attempted_to_status == Status.FAILED` handling, fixed in design-review Round 2 — so a catching
+  coordinator can make the three-way call (benign progress / already-failed-elsewhere / genuine
+  bug — F7) deterministically, from the exception alone, without a second racy `get(doc_id)`.
+  `config/ledger.yaml` declares `LEDGER_TRANSITION_INVALID: PERMANENT` per house rules; this
+  triage is coordinator-facing guidance layered on top of that fixed classification, not a new
+  classification and not a new error code. The one cross-module exception (F6,
+  `IdentityInvalid`/`IDENTITY_INVALID`) is already classified PERMANENT by REQ-002, so no
+  unclassified/default-TRANSIENT case exists in this module. `InMemoryLedgerStore` makes no
+  external call, so no TRANSIENT code originates here (matches the story's explicit "in-memory
+  implementation... has no external cost"). Separately: the `attempts` counter (A4) has **no
+  ledger-enforced cap** on same-status self-transition retries — enforcing Contract #4's "poison
+  after max dequeue" is intentionally deferred to the coordinator/queue layer, which owns
+  delivery-count tracking, not this module; this module only *records* how many attempts occurred
+  (via `attempts`), it does not decide when to stop retrying.
 
 ## 5. Error codes
 
@@ -317,6 +522,15 @@ classification="PERMANENT")` unless noted)
 | `LEDGER_TRANSITION_INVALID` | PERMANENT | `transition()` called on a row already `INDEXED` or `FAILED` (F4) |
 | `LEDGER_TRANSITION_INVALID` | PERMANENT | `to_status == FAILED` with `error_code` omitted (F5) |
 | `IDENTITY_INVALID` (cross-module, `ingestion/identity/derive.py`) | PERMANENT | `doc_id` passed to `create()`/`transition()` fails `validate_id_format` (F6) |
+
+`F7` (concurrent loss) is **not** a distinct trigger/code — a losing caller's request surfaces as
+one of F1/F3/F4/F5 above, evaluated against the winner's already-applied state. The classification
+of `LEDGER_TRANSITION_INVALID` itself does not change under F7; what changes is that the raising
+module now hands the catching coordinator everything (`observed_row`,
+`attempted_to_status`/`attempted_stage`) needed to run `is_benign_concurrent_loss()` (§1) and
+decide whether this particular raise should also mark the *document* `failed`, per the three-way
+triage in §3 F7 / §4, before applying Contract #4's literal "PERMANENT → mark failed" action. This
+includes the `attempted_to_status == Status.FAILED` sub-case fixed in design-review Round 2 (§1).
 
 No TRANSIENT codes originate in this module. Future backend adapters (Azure Table Storage /
 Cosmos DB, Phase 2, out of scope here) will need to declare their own TRANSIENT codes for
@@ -331,8 +545,8 @@ New file `config/ledger.yaml`:
 ledger:
   error_codes:
     LEDGER_TRANSITION_INVALID: PERMANENT
-  default_list_limit: 100     # documentation/audit only — see below
-  legal_transitions:          # documentation/audit only — see below
+  default_list_limit: 100     # operational tunable — kept in sync with the code default, see below
+  legal_transitions:          # documentation/audit only — safety invariant, code-authoritative, see below
     pending: [analyzing, failed]
     analyzing: [chunking, failed]
     chunking: [embedding, failed]
@@ -342,15 +556,32 @@ ledger:
     failed: []
 ```
 
-As with `config/envelope.yaml` and `config/identity.yaml`, `default_list_limit` and
-`legal_transitions` are listed for documentation/audit visibility only; neither is read at runtime
-to change behavior. The authoritative default lives in `list_by_status`'s `limit: int = 100`
-parameter (part of the documented public interface, §1); the authoritative FSM lives in
-`_LEGAL_TRANSITIONS` and `validate_transition` in `ingestion/ledger/store.py`. This is deliberate,
-matching REQ-001/REQ-002's precedent: the transition table is Contract #3's safety-critical
-invariant — a config edit alone must never be able to loosen which stage transitions are
-considered legal, since that would silently permit corrupt/out-of-order pipeline state. Changing
-the FSM requires a code change and a new LLD/PR.
+These two keys are **not** the same kind of "config-only" carve-out, and this LLD deliberately
+does not bundle them under one justification:
+
+- **`legal_transitions`** matches `config/envelope.yaml`/`config/identity.yaml`'s established
+  precedent exactly: it is listed for documentation/audit visibility only and is never read at
+  runtime to change behavior. The authoritative FSM lives in `_LEGAL_TRANSITIONS` and
+  `validate_transition` in `ingestion/ledger/store.py`. This is a genuine safety-invariant
+  exception to "all tunables from config": the transition table is Contract #3's safety-critical
+  invariant — a config edit alone must never be able to loosen which stage transitions are
+  legal, since that would silently permit corrupt/out-of-order pipeline state. Changing the FSM
+  requires a code change and a new LLD/PR.
+- **`default_list_limit` is a plain operational tunable with no idempotency or safety
+  implication** — pagination page size has no bearing on Contract #2/#3 correctness — so it does
+  **not** share `legal_transitions`'s justification. In this LLD it is expressed as the literal
+  default (`limit: int = 100`) on `LedgerStore.list_by_status` / on
+  `InMemoryLedgerStore.__init__`'s `default_list_limit` parameter (§1), matching the story's given
+  signature exactly rather than changing it. `config/ledger.yaml`'s `default_list_limit` is the
+  documented source of truth for that literal, and the two are required to be kept in sync by a
+  dedicated test (`test_config_default_list_limit_matches_code_default`, §7) rather than by a
+  runtime config-load, because **no config-loading mechanism exists anywhere in this codebase
+  yet** — REQ-001/REQ-002's YAMLs are equally documentation-only today (see `config/envelope.yaml`,
+  `config/identity.yaml`), and introducing the first one is out of scope for this LLD. Unlike
+  `legal_transitions`, nothing about Contract #3 blocks a future revision from having
+  `InMemoryLedgerStore`'s composition root read `config/ledger.yaml` and pass
+  `default_list_limit` in directly (the constructor parameter already exists for exactly this,
+  §1) — this is a scoping simplification, not a safety exception.
 
 ## 7. Test plan
 
@@ -376,13 +607,17 @@ the FSM requires a code change and a new LLD/PR.
 - `test_transition_to_failed_with_error_code_succeeds_and_stores_it` — row's `last_error_code`/
   `last_error_message` set as given.
 - `test_transition_stage_mismatch_rejected` — `stage != to_status` → PERMANENT (F1).
-- `test_transition_unknown_doc_id_rejected` — no prior `create()` → PERMANENT (F2).
+- `test_transition_unknown_doc_id_rejected` — no prior `create()` → PERMANENT (F2),
+  `exc.observed_row is None`.
 - `test_attempts_increment_on_same_stage_retry` — self-transition increments `attempts` by 1 each
   call (AC4, A2).
 - `test_attempts_reset_on_advance_to_new_stage` — forward legal transition resets `attempts` to 1
   (A4).
 - `test_attempts_frozen_at_failed_value` — `attempts` on the row after transitioning to `FAILED`
   equals the value it held immediately before (not incremented, not reset).
+- `test_attempts_has_no_enforced_upper_cap` — many consecutive same-status retries all succeed and
+  keep incrementing `attempts`; the store never itself raises/blocks based on `attempts` magnitude
+  (§4 — poison threshold is out of scope for this module).
 - `test_updated_at_set_on_every_transition_ingested_at_only_on_create` — `ingested_at` constant
   across all transitions; `updated_at` changes on each (AC5).
 - `test_last_error_cleared_on_clean_forward_advance` — a row with a stale `last_error_code` from a
@@ -404,6 +639,45 @@ the FSM requires a code change and a new LLD/PR.
 - `test_thread_safety_concurrent_create_same_doc_id` — N threads calling `create()` concurrently
   for the same new `doc_id` → exactly one row created, all callers receive rows with identical
   `ingested_at`.
+- `test_concurrent_loss_exception_carries_observed_row_and_attempted_request` — two threads race
+  the identical `transition(doc_id, to_status=X, stage=X)`; the losing thread's caught
+  `LedgerTransitionInvalid` has `observed_row.status == X` (the winner's applied state) and
+  `attempted_to_status == attempted_stage == X` (F7).
+- `test_is_benign_concurrent_loss_true_when_observed_equals_attempted` — `observed_row.status ==
+  attempted_to_status`, both non-`FAILED` → `True`.
+- `test_is_benign_concurrent_loss_true_when_observed_further_along_same_path` —
+  `observed_row.status` later in `_FORWARD_ORDER` than `attempted_to_status` (both non-`FAILED`)
+  → `True`.
+- `test_is_benign_concurrent_loss_false_when_observed_row_is_none` — F2 case → `False`.
+- `test_is_benign_concurrent_loss_false_when_observed_earlier_or_off_path` — `observed_row.status`
+  earlier than `attempted_to_status` (both non-`FAILED`), or `stage != to_status` in the original
+  request → `False`.
+- `test_is_benign_concurrent_loss_false_when_attempted_non_failed_and_observed_failed` —
+  `attempted_to_status` is any non-`FAILED` status, `observed_row.status == Status.FAILED` →
+  `False` (step 5), paired with the F7-step-2 caller guidance that treats this as
+  already-failed-elsewhere rather than a real bug.
+- `test_is_benign_concurrent_loss_true_when_attempted_failed_and_observed_indexed` — **(Round 2,
+  regression for the fixed bug)** `attempted_to_status = attempted_stage = Status.FAILED`,
+  `observed_row.status == Status.INDEXED` → returns `True` without raising `ValueError` (§1
+  step 4).
+- `test_is_benign_concurrent_loss_false_when_attempted_failed_and_observed_mid_pipeline` —
+  **(Round 2)** `attempted_to_status = attempted_stage = Status.FAILED`, `observed_row.status` one
+  of `ANALYZING`/`CHUNKING`/`EMBEDDING`/`INDEXING` (parametrized) → returns `False` without
+  raising (§1 step 4 — genuine-conflict branch, handled as a real bug per F7 step 3).
+- `test_is_benign_concurrent_loss_false_when_attempted_failed_and_observed_failed` — **(Round 2)**
+  `attempted_to_status = attempted_stage = Status.FAILED`, `observed_row.status == Status.FAILED`
+  → returns `False` without raising (§1 step 4), paired with F7 step 2 independently catching this
+  exact case (regardless of what the caller attempted) and treating it as already-resolved, not a
+  bug.
+- `test_is_benign_concurrent_loss_never_raises` — **(Round 2, the primary regression test for the
+  fixed crash)** parametrized/hypothesis-driven over every `(attempted_to_status,
+  observed_row.status)` pair across all seven `Status` values, plus `observed_row=None` and
+  `attempted_stage != attempted_to_status`, asserting the helper always returns a `bool` and never
+  raises any exception, `ValueError` in particular.
+- `test_config_default_list_limit_matches_code_default` — parses `config/ledger.yaml`'s
+  `ledger.default_list_limit` and asserts it equals `inspect.signature(LedgerStore.list_by_status)
+  .parameters["limit"].default` and `InMemoryLedgerStore().__init__`'s own default — keeps the
+  two in sync per §6.
 - `test_property_legal_transition_sequences_end_consistent` (hypothesis) — random walks through
   the legal graph (forward edges + same-status retries) starting from `pending`, of varying
   length, always leave the row in a state matching the last-applied edge, with `attempts`/
@@ -418,6 +692,10 @@ the FSM requires a code change and a new LLD/PR.
   explicit budget); a full document lifecycle (`create` + 5 forward transitions:
   analyzing/chunking/embedding/indexing/indexed) is ≤ 6 ledger writes, so < 30ms p95 total ledger
   overhead per successfully-indexed document, excluding any same-status retries (A2), each adding
-  another ≤ 5ms.
+  another ≤ 5ms. `is_benign_concurrent_loss()` is an in-process, allocation-free comparison
+  (§1) — negligible (<< 1ms) added latency on the caught-exception path, not on the happy path.
 - Cost per document: $0 / 0 tokens — `InMemoryLedgerStore` is pure in-process dict access, no
   external API or network call.
+- No cap is enforced by this module on retry attempts (§4); poison-queue thresholds and any
+  latency/cost impact of unbounded retries are a coordinator/queue-layer budget concern, out of
+  scope for this module's own budget.
