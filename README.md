@@ -1,52 +1,77 @@
-# Ingestion Framework — Agent-Team Starter Kit (Pro-plan tuned)
+# Vestibule
 
-Seven-role pipeline trimmed to four agents + you, built for Claude Code on a Pro plan.
-You are the Story author and the two human gates (design approval, merge).
+The entry hall of your RAG pipeline. Every document passes through, gets identified, checked, and logged — before anything downstream sees it.
 
-## The lifecycle (tracked entirely in GitHub)
+Python 3.11+ · MIT · [v0.1.0](../../releases/tag/v0.1.0)
 
+---
+
+Every team building enterprise RAG rebuilds the same plumbing. Deterministic document IDs so retries don't duplicate. A ledger to answer "did this document make it in?" A failure taxonomy so a corrupt PDF doesn't get retried five times before landing in a poison queue. Governance so an intern's query can't return the CEO's documents.
+
+None of the good parsing libraries ship this. None of the orchestration frameworks either. Everyone builds it — badly — the first time they hit production.
+
+Vestibule is the plumbing. It has strong opinions about a small number of things and no opinions at all about the things you should be free to choose.
+
+## What it does today (v0.1)
+
+The four contracts every production RAG pipeline needs, as a Python package you can install and build on.
+
+**Arrival envelope.** One normalized shape every document enters through, no matter the source. Strict schema, deterministic identity, default-deny ACLs. Adapters upstream of the envelope can be anything; everything downstream depends on this contract and nothing else.
+
+**Deterministic identity.** `doc_id` and `chunk_id` are pure functions of their inputs. Same document, same ID, forever. This is what makes at-least-once queue delivery safe — retries overwrite instead of duplicating.
+
+**State ledger.** One row per document, one legal state machine (`pending → analyzing → chunking → embedding → indexing → indexed`). Illegal transitions raise. Thread-safe in-memory implementation ships now; Azure Table Storage and Cosmos DB adapters ship in v0.2.
+
+**Failure taxonomy.** Every error the framework raises is registered with a `PERMANENT` or `TRANSIENT` classification. Callers decide their retry policy; the classification decides whether retry is even the right move. Unclassified errors default to `TRANSIENT` and log a warning.
+
+## What it does not do yet
+
+- No parsers, chunkers, embedders, or indexers. Those ship in v0.2.
+- No retry engine. Callers use `tenacity` (or their own) with our `classify()`.
+- No admin UI, no evaluation loop, no cross-vendor parser arbitrage. Those are the roadmap.
+
+If you need those parts today, Vestibule is the wrong entry point. If you're planning to build them and don't want to rewrite identity and state handling six months in, this is where you start.
+
+## Install
+
+```bash
+pip install vestibule
 ```
-GitHub Issue (label: stage:story)
-  → you write docs/stories/REQ-<id>.md from TEMPLATE.md        [label → stage:design]
-  → @lld produces docs/designs/REQ-<id>-lld.md                 
-  → @design-reviewer verdict on the LLD                        
-  → YOU approve (commit design, flip label)                    [label → stage:dev]
-  → @developer implements on branch req/<id>, opens PR
-  → @reviewer verdict on the PR diff                           [label → stage:review]
-  → YOU merge                                                  [label → done]
-```
 
-Branch protection: require the reviewer verdict before merge. Every requirement's full
-history = its issue thread + committed story/design + PR review comments.
+Requires Python 3.11.
 
-## Running it (inside Claude Code, one component per session)
+## Five-minute example
 
-```
-# fresh session per component — kill context between components
-claude
-> Use the lld subagent on docs/stories/REQ-001.md
-> Use the design-reviewer subagent on docs/designs/REQ-001-lld.md
-# fix findings, approve, then (new session):
-> Use the developer subagent to implement docs/designs/REQ-001-lld.md
-> Use the reviewer subagent on the current diff
-```
+```python
+from vestibule import (
+    DocumentEnvelope,
+    InMemoryLedgerStore,
+    Status,
+    classify,
+    Severity,
+)
 
-## Pro-plan discipline (why this kit is shaped this way)
-- One component per session; fresh session per component (context = money).
-- Plan mode before implementation; Sonnet for dev/review, Opus only for Phase 1 designs.
-- Reviews read diffs, not repos (enforced in reviewer.md).
-- CLAUDE.md stays under 40 lines; procedure detail lives in role files (lazy-loaded).
-- Batch agent work into 1–2 focused blocks/day; watch Settings → Usage weekly.
-- Overflow week? Enable usage credits temporarily instead of upgrading plans.
+# An adapter constructs an envelope from the arriving document.
+env = DocumentEnvelope(
+    source="blob:hr-uploads",
+    blob_path="policies/leave-2026.pdf",
+    allowed_groups=["hr-staff", "all-employees"],
+    trust_tier="internal_verified",
+    content_hash="sha256:e7b1...9f04",
+)
 
-## Phase 1 build order (full pipeline: lld → design-review → dev → review)
-1. REQ-001 Arrival Envelope (models + validation)
-2. REQ-002 Identity & Idempotency (id derivation + upsert helpers)
-3. REQ-003 State Ledger (state machine + Table Storage adapter)
-4. REQ-004 Failure Taxonomy (classifier + retry/poison policy engine)
+# The ledger keys everything on doc_id. Idempotent — retries hit the same row.
+ledger = InMemoryLedgerStore()
+ledger.create(env.doc_id, envelope_summary=env.summary())
 
-Phases 2+ use the light path: you + @developer + @reviewer (skip lld/design gate
-for low-risk components; the contracts in CLAUDE.md still bind everything).
+# Every stage transition is a single call. Illegal transitions raise.
+ledger.transition(env.doc_id, to_status=Status.ANALYZING, stage="analyzing")
+ledger.transition(env.doc_id, to_status=Status.CHUNKING, stage="chunking")
+# ...
+ledger.transition(env.doc_id, to_status=Status.INDEXED, stage="indexing")
 
-## GitHub labels to create
-`stage:story` `stage:design` `stage:dev` `stage:review` `done` `blocked`
+# When something fails, classification decides what happens next.
+try:
+    do_embedding(env)
+except SomeExternalTimeout:
+    match
