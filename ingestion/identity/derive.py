@@ -17,11 +17,13 @@ import hashlib
 import re
 from typing import Iterable, Literal
 
+from ingestion.errors.registry import RaggedError, Severity, register_error
+
 ID_HEX_LENGTH: int = 64
 _HEX_RE: re.Pattern[str] = re.compile(r"^[0-9a-f]{64}$")
 
 
-class IdentityInvalid(Exception):
+class IdentityInvalid(RaggedError):
     """Raised for any malformed identity input. Always PERMANENT — malformed identity
     inputs are a producer/caller bug, never a transient condition worth retrying."""
 
@@ -32,7 +34,14 @@ class IdentityInvalid(Exception):
         """code and classification are fixed by this class, not caller-supplied."""
         self.field_name = field_name
         self.reason = reason
-        super().__init__(f"{field_name}: {reason}")
+        super().__init__(f"{field_name}: {reason}", error_code=self.code)
+
+
+register_error(
+    IdentityInvalid.code,
+    Severity.PERMANENT,
+    "malformed identity input to doc_id/chunk_id derivation (REQ-002)",
+)
 
 
 def derive_doc_id(source: str, blob_path: str) -> str:
@@ -55,7 +64,9 @@ def derive_chunk_id(doc_id: str, chunk_index: int) -> str:
     """
     validated_doc_id = validate_id_format(doc_id, field_name="doc_id")
     _validate_chunk_index(chunk_index)
-    return hashlib.sha256((validated_doc_id + str(chunk_index)).encode("utf-8")).hexdigest()
+    return hashlib.sha256(
+        (validated_doc_id + str(chunk_index)).encode("utf-8")
+    ).hexdigest()
 
 
 def derive_chunk_ids_batch(doc_id: str, chunk_indices: Iterable[int]) -> dict[int, str]:

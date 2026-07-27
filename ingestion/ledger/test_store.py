@@ -11,6 +11,7 @@ import pytest
 from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
+from ingestion.errors.registry import RaggedError, Severity, classify
 from ingestion.identity.derive import IdentityInvalid, derive_doc_id
 from ingestion.ledger.store import (
     _FORWARD_ORDER,
@@ -623,6 +624,54 @@ def test_config_default_list_limit_matches_code_default() -> None:
     )
 
     assert config_value == list_by_status_default == init_default
+
+
+# --- REQ-004 cross-module regression guards (Contract #4 migration) -------------------
+
+
+def test_ledger_transition_invalid_is_ragged_error() -> None:
+    row = _row(Status.PENDING)
+    exc = LedgerTransitionInvalid(
+        "doc",
+        "reason",
+        observed_row=row,
+        attempted_to_status=Status.ANALYZING,
+        attempted_stage=Status.ANALYZING,
+    )
+    assert isinstance(exc, RaggedError)
+    assert exc.error_code == exc.code == "LEDGER_TRANSITION_INVALID"
+
+
+def test_ledger_transition_invalid_registered_in_default_registry() -> None:
+    assert classify("LEDGER_TRANSITION_INVALID") == Severity.PERMANENT
+
+
+def test_existing_classification_attr_matches_registry_severity() -> None:
+    """Drift guard (Assumption A7): the hardcoded `classification` literal must never
+    silently diverge from what the registry now reports for the same code."""
+    assert (
+        classify(LedgerTransitionInvalid.code).value
+        == LedgerTransitionInvalid.classification
+    )
+
+
+def test_existing_constructor_signature_unchanged() -> None:
+    """Regression guard: LedgerTransitionInvalid(doc_id, reason, observed_row=...,
+    attempted_to_status=..., attempted_stage=...) still constructs with the exact call
+    shape used by this module's own pre-REQ-004 tests (migration note)."""
+    row = _row(Status.PENDING)
+    exc = LedgerTransitionInvalid(
+        "doc-id",
+        "some reason",
+        observed_row=row,
+        attempted_to_status=Status.ANALYZING,
+        attempted_stage=Status.ANALYZING,
+    )
+    assert exc.doc_id == "doc-id"
+    assert exc.reason == "some reason"
+    assert exc.observed_row == row
+    assert exc.attempted_to_status == Status.ANALYZING
+    assert exc.attempted_stage == Status.ANALYZING
 
 
 # --- property-based tests (hypothesis) --------------------------------------------------

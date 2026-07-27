@@ -1,0 +1,27 @@
+errors:
+  error_codes:
+    ERROR_CODE_REGISTRATION_INVALID: PERMANENT
+  unknown_code_default_severity: TRANSIENT   # documentation only — see below
+  known_codes:                                # aggregate audit view — documentation only, see below
+    ERROR_CODE_REGISTRATION_INVALID: PERMANENT
+    ENVELOPE_INVALID: PERMANENT
+    IDENTITY_INVALID: PERMANENT
+    LEDGER_TRANSITION_INVALID: PERMANENT
+
+# NOTE: unknown_code_default_severity and known_codes are listed here for
+# documentation/audit visibility only, following the exact precedent set by
+# config/envelope.yaml's trust_tiers and config/ledger.yaml's legal_transitions: neither
+# is read at runtime to change behavior. The authoritative default-severity behavior is
+# hardcoded in ErrorRegistry.classify (ingestion/errors/registry.py); the authoritative
+# code catalog is whatever has actually been registered into _DEFAULT_REGISTRY at
+# runtime, retrievable via all_codes(). This is a genuine safety-invariant carve-out for
+# the same reason as REQ-001/002/003's equivalents: a config edit alone must never be
+# able to change which severity an unregistered code defaults to, or fabricate/omit an
+# entry in the audit list without a corresponding code change. This known_codes block is
+# kept from silently drifting against the real registry by a dedicated test
+# (test_config_known_codes_matches_all_codes_after_importing_all_modules).
+#
+# config/envelope.yaml, config/identity.yaml, and config/ledger.yaml's existing
+# error_codes: blocks (each declaring their own single code) are unchanged by this REQ —
+# config/errors.yaml is a new, additional aggregate view, not a replacement for the
+# per-module declarations.

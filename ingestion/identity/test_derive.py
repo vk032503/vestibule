@@ -6,6 +6,7 @@ import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
+from ingestion.errors.registry import RaggedError, Severity, classify
 from ingestion.identity.derive import (
     IdentityInvalid,
     _HEX_RE,
@@ -216,6 +217,33 @@ def test_identity_invalid_constructor_sets_fixed_fields() -> None:
     assert exc.reason == "negative int"
 
 
+# --- REQ-004 cross-module regression guards (Contract #4 migration) -------------------
+
+
+def test_identity_invalid_is_ragged_error() -> None:
+    exc = IdentityInvalid("x", "y")
+    assert isinstance(exc, RaggedError)
+    assert exc.error_code == exc.code == "IDENTITY_INVALID"
+
+
+def test_identity_invalid_registered_in_default_registry() -> None:
+    assert classify("IDENTITY_INVALID") == Severity.PERMANENT
+
+
+def test_existing_constructor_signature_unchanged() -> None:
+    """Regression guard: IdentityInvalid(field_name, reason) still constructs with the
+    exact call shape used by this module's own pre-REQ-004 tests (migration note)."""
+    exc = IdentityInvalid(field_name="chunk_index", reason="negative int")
+    assert exc.field_name == "chunk_index"
+    assert exc.reason == "negative int"
+
+
+def test_existing_classification_attr_matches_registry_severity() -> None:
+    """Drift guard (Assumption A7): the hardcoded `classification` literal must never
+    silently diverge from what the registry now reports for the same code."""
+    assert classify(IdentityInvalid.code).value == IdentityInvalid.classification
+
+
 # --- property-based tests (hypothesis) --------------------------------------------------
 
 _non_empty_text = st.text(min_size=1)
@@ -230,7 +258,13 @@ def test_property_derive_doc_id_determinism(source: str, blob_path: str) -> None
     assert _HEX_RE.match(a)
 
 
-@given(salt=st.text(alphabet=st.characters(min_codepoint=97, max_codepoint=122), min_size=1, max_size=12))
+@given(
+    salt=st.text(
+        alphabet=st.characters(min_codepoint=97, max_codepoint=122),
+        min_size=1,
+        max_size=12,
+    )
+)
 @settings(max_examples=5, suppress_health_check=[HealthCheck.too_slow])
 def test_property_derive_doc_id_uniqueness(salt: str) -> None:
     """Over 1,000 distinct (source, blob_path) pairs (randomized via a hypothesis-drawn

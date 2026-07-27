@@ -28,6 +28,7 @@ from typing import Literal, NoReturn
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ingestion.errors.registry import RaggedError, Severity, register_error
 from ingestion.identity.derive import validate_id_format
 
 
@@ -125,7 +126,7 @@ class EnvelopeSummary:
     config_version: str
 
 
-class LedgerTransitionInvalid(Exception):
+class LedgerTransitionInvalid(RaggedError):
     """Raised for any illegal state transition or malformed transition request.
 
     Always classified PERMANENT at the exception-class level — an illegal transition
@@ -176,7 +177,15 @@ class LedgerTransitionInvalid(Exception):
         self.observed_row = observed_row
         self.attempted_to_status = attempted_to_status
         self.attempted_stage = attempted_stage
-        super().__init__(f"{doc_id}: {reason}")
+        super().__init__(f"{doc_id}: {reason}", error_code=self.code)
+
+
+register_error(
+    LedgerTransitionInvalid.code,
+    Severity.PERMANENT,
+    "illegal or malformed ledger state transition, incl. benign concurrent races "
+    "requiring caller-side is_benign_concurrent_loss() triage (REQ-003)",
+)
 
 
 def is_benign_concurrent_loss(

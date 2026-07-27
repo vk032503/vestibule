@@ -18,8 +18,16 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
+from ingestion.errors.registry import RaggedError, Severity, register_error
 from ingestion.identity.derive import IdentityInvalid, derive_doc_id
 
 _CONTENT_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -38,7 +46,7 @@ class TrustTier(str, Enum):
     RESTRICTED = "restricted"
 
 
-class EnvelopeValidationError(Exception):
+class EnvelopeValidationError(RaggedError):
     """Raised whenever an ArrivalEnvelope fails validation. Always PERMANENT."""
 
     code: str = "ENVELOPE_INVALID"
@@ -47,13 +55,25 @@ class EnvelopeValidationError(Exception):
     def __init__(self, field_errors: list[dict[str, str]]) -> None:
         self.field_errors = field_errors
         summary = "; ".join(f"{e['field']}: {e['reason']}" for e in field_errors)
-        super().__init__(f"{self.code}: {summary or 'invalid envelope'}")
+        super().__init__(
+            f"{self.code}: {summary or 'invalid envelope'}", error_code=self.code
+        )
+
+
+register_error(
+    EnvelopeValidationError.code,
+    Severity.PERMANENT,
+    "arrival envelope failed schema or doc_id cross-check validation (REQ-001)",
+)
 
 
 def _wrap_validation_error(exc: ValidationError) -> EnvelopeValidationError:
     """Maps a pydantic ValidationError to the module's declared PERMANENT error."""
     field_errors = [
-        {"field": ".".join(str(part) for part in err["loc"]) or "__root__", "reason": err["msg"]}
+        {
+            "field": ".".join(str(part) for part in err["loc"]) or "__root__",
+            "reason": err["msg"],
+        }
         for err in exc.errors()
     ]
     return EnvelopeValidationError(field_errors)
@@ -100,7 +120,9 @@ class ArrivalEnvelope(BaseModel):
         """
         expected = compute_doc_id(self.source, self.blob_path)
         if self.doc_id != expected:
-            raise ValueError(f"doc_id does not match sha256(source + blob_path); expected {expected}")
+            raise ValueError(
+                f"doc_id does not match sha256(source + blob_path); expected {expected}"
+            )
         return self
 
 
@@ -136,7 +158,9 @@ def build_envelope(
             allowed_groups=allowed_groups if allowed_groups is not None else [],
             trust_tier=trust_tier,
             content_hash=content_hash,
-            received_at=received_at if received_at is not None else datetime.now(timezone.utc),
+            received_at=received_at
+            if received_at is not None
+            else datetime.now(timezone.utc),
         )
     except ValidationError as exc:
         raise _wrap_validation_error(exc) from exc
@@ -157,7 +181,9 @@ def envelope_from_json(raw: str | bytes) -> ArrivalEnvelope:
     try:
         data: Any = json.loads(raw)
     except (json.JSONDecodeError, TypeError, UnicodeDecodeError) as exc:
-        raise EnvelopeValidationError([{"field": "__root__", "reason": f"malformed JSON: {exc}"}]) from exc
+        raise EnvelopeValidationError(
+            [{"field": "__root__", "reason": f"malformed JSON: {exc}"}]
+        ) from exc
 
     try:
         return ArrivalEnvelope.model_validate(data)
