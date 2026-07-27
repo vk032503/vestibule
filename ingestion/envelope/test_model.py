@@ -15,6 +15,7 @@ from ingestion.envelope.model import (
     envelope_from_json,
     envelope_to_json,
 )
+from ingestion.errors.registry import RaggedError, Severity, classify
 from ingestion.identity.derive import derive_doc_id
 
 VALID_CONTENT_HASH = "a" * 64
@@ -95,7 +96,10 @@ def test_build_envelope_valid_full() -> None:
 # --- missing required fields (via envelope_from_json, the untrusted-payload path) ---
 
 
-@pytest.mark.parametrize("missing_field", ["source", "blob_path", "trust_tier", "content_hash", "received_at"])
+@pytest.mark.parametrize(
+    "missing_field",
+    ["source", "blob_path", "trust_tier", "content_hash", "received_at"],
+)
 def test_missing_required_field(missing_field: str) -> None:
     payload = _valid_payload()
     del payload[missing_field]
@@ -340,3 +344,33 @@ def test_build_envelope_default_received_at_is_tz_aware_utc() -> None:
         trust_tier=TrustTier.PUBLIC,
     )
     assert env.received_at.tzinfo is not None
+
+
+# --- REQ-004 cross-module regression guards (Contract #4 migration) -------------------
+
+
+def test_envelope_validation_error_is_ragged_error() -> None:
+    exc = EnvelopeValidationError([{"field": "source", "reason": "empty string"}])
+    assert isinstance(exc, RaggedError)
+    assert exc.error_code == exc.code == "ENVELOPE_INVALID"
+
+
+def test_envelope_invalid_registered_in_default_registry() -> None:
+    assert classify("ENVELOPE_INVALID") == Severity.PERMANENT
+
+
+def test_existing_classification_attr_matches_registry_severity() -> None:
+    """Drift guard (Assumption A7): the hardcoded `classification` literal must never
+    silently diverge from what the registry now reports for the same code."""
+    assert (
+        classify(EnvelopeValidationError.code).value
+        == EnvelopeValidationError.classification
+    )
+
+
+def test_existing_constructor_signature_unchanged() -> None:
+    """Regression guard: EnvelopeValidationError(field_errors) still constructs with the
+    exact call shape used by this module's own pre-REQ-004 tests (migration note)."""
+    field_errors = [{"field": "source", "reason": "empty string"}]
+    exc = EnvelopeValidationError(field_errors)
+    assert exc.field_errors == field_errors
