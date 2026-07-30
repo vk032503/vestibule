@@ -410,8 +410,9 @@ def test_error_code_registration_invalid_registered_in_default_registry() -> Non
 
 
 def test_config_known_codes_matches_all_codes_after_importing_all_modules() -> None:
-    # Import all three retrofitted modules so every module-owned code is registered into
-    # _DEFAULT_REGISTRY before comparing against config/errors.yaml's known_codes block.
+    # Import every module that registers its own codes into _DEFAULT_REGISTRY before
+    # comparing against config/errors.yaml's known_codes block.
+    import ingestion.analyzer.model  # noqa: F401
     import ingestion.envelope.model  # noqa: F401
     import ingestion.identity.derive  # noqa: F401
     import ingestion.ledger.store  # noqa: F401

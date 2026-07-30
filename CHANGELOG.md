@@ -6,23 +6,23 @@ Versioning: [SemVer](https://semver.org/).
 ## [Unreleased]
 
 ### Added
-- REQ-001: Arrival envelope (`DocumentEnvelope`) — canonical shape for pipeline entry.
-- REQ-002: Deterministic identity — `derive_doc_id`, `derive_chunk_id`, `IdentityInvalid`.
-- REQ-003: State ledger (`ingestion.ledger`) — `Status` FSM, `LedgerRow`, `LedgerStore`
-  port, `InMemoryLedgerStore`, `LedgerTransitionInvalid` (PERMANENT,
-  `LEDGER_TRANSITION_INVALID`), and `is_benign_concurrent_loss` for triaging losing
-  callers of a concurrent `transition()` race — Contract #3.
-- REQ-004: Failure taxonomy (`ingestion.errors`) — `Severity` (PERMANENT/TRANSIENT),
-  `ErrorCode`, `ErrorRegistry`, `RaggedError` base exception carrying `error_code`, and
-  module-level `register_error`/`classify`/`all_codes` — Contract #4. `classify()`
-  defaults unregistered codes to `TRANSIENT` with a logged warning.
+- REQ-005: Document Analyzer (`Analyzer`, `AnalyzerConfig`) — the first Phase 2
+  component. Type detection (`detect_type`), the `ParserAdapter`/`ParserRegistry`
+  contract, and two adapters (`PyMuPDFParser` for digital PDFs, thin-wrapping
+  `pymupdf`; `DocumentIntelligenceParser` for scanned PDFs, thin-wrapping Azure
+  Document Intelligence's `prebuilt-layout` model). Owns the `analyzing` ledger stage:
+  `pending -> analyzing -> {chunking | failed}`, with same-status `analyzing ->
+  analyzing` self-transitions on every TRANSIENT failure (`PARSER_TIMEOUT`,
+  `DOCINT_RATE_LIMITED`, `DOCINT_UPSTREAM_ERROR`, `PARSER_INTERNAL`) so a
+  redelivered/retried document stays re-enterable; only the two PERMANENT failures
+  (`ANALYZER_UNSUPPORTED_TYPE`, `ANALYZER_NO_PARSER`) terminalize the ledger row to
+  `failed`. Adds `config/analyzer.yaml` and `benchmarks/README.md`.
 
 ### Changed
-- REQ-004: `IdentityInvalid`, `EnvelopeValidationError`, and `LedgerTransitionInvalid`
-  (REQ-001/002/003) now inherit from `RaggedError` and register their codes
-  (`IDENTITY_INVALID`, `ENVELOPE_INVALID`, `LEDGER_TRANSITION_INVALID`) into the default
-  error registry at import time. Non-breaking: no existing public constructor signature
-  or attribute changed.
+- `config/errors.yaml`'s `known_codes` audit block now also lists REQ-005's six error
+  codes, and the corresponding cross-module sync test now imports
+  `ingestion.analyzer.model` — both are registered into the same process-wide error
+  registry REQ-004 established.
 
 ### Removed
 - _(none yet)_
@@ -32,3 +32,13 @@ Versioning: [SemVer](https://semver.org/).
 
 ### Security
 - _(none yet)_
+
+## [0.1.0] - 2026-07-27
+
+### Added
+- REQ-001: Arrival envelope (`DocumentEnvelope`) — canonical shape for pipeline entry.
+- REQ-002: Deterministic identity — `derive_doc_id`, `derive_chunk_id`, `IdentityInvalid`.
+- REQ-003: State ledger (`LedgerRow`, `Status` enum, `LedgerStore` interface,
+  `InMemoryLedgerStore` thread-safe implementation, `LedgerTransitionInvalid` error).
+- REQ-004: Failure taxonomy — `ErrorRegistry`, `Severity` enum, `RaggedError` base class.
+  Existing errors from REQ-001–003 now inherit from `RaggedError` and register their codes.

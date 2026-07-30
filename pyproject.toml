@@ -4,6 +4,9 @@ version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2.0,<3.0",
+    "pymupdf>=1.24,<2.0",
+    "azure-ai-documentintelligence>=1.0,<2.0",
+    "azure-core>=1.30,<2.0",
 ]
 
 [project.optional-dependencies]
@@ -14,3 +17,17 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["ingestion"]
+
+[[tool.mypy.overrides]]
+# PyMuPDF (fitz) ships a `py.typed` marker but its SWIG-generated bindings are only
+# partially annotated, so calls into it (pymupdf.open(), Document.tobytes(), etc.) are
+# reported as "untyped function" calls under `mypy --strict`'s disallow_untyped_calls.
+# Scoped to exactly the modules that call into PyMuPDF, so strict-mode checking is
+# unchanged everywhere else in this codebase.
+module = [
+    "ingestion.analyzer.detect",
+    "ingestion.analyzer.conftest",
+    "ingestion.analyzer.parsers.pymupdf_parser",
+    "ingestion.analyzer.parsers.test_pymupdf_parser",
+]
+disallow_untyped_calls = false
