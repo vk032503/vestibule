@@ -7,6 +7,12 @@ errors:
     ENVELOPE_INVALID: PERMANENT
     IDENTITY_INVALID: PERMANENT
     LEDGER_TRANSITION_INVALID: PERMANENT
+    ANALYZER_UNSUPPORTED_TYPE: PERMANENT
+    ANALYZER_NO_PARSER: PERMANENT
+    PARSER_TIMEOUT: TRANSIENT
+    DOCINT_RATE_LIMITED: TRANSIENT
+    DOCINT_UPSTREAM_ERROR: TRANSIENT
+    PARSER_INTERNAL: TRANSIENT
 
 # NOTE: unknown_code_default_severity and known_codes are listed here for
 # documentation/audit visibility only, following the exact precedent set by
