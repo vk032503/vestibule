@@ -10,7 +10,7 @@ envelope:
 # NOTE: trust_tiers, content_hash_algo, content_hash_length, strict_schema, and
 # default_allowed_groups are listed here for documentation/audit visibility only.
 # None of them are read at runtime to change behavior. The authoritative definitions
-# live in code: ingestion/envelope/model.py (TrustTier enum, the
+# live in code: vestibule/envelope/model.py (TrustTier enum, the
 # _content_hash_is_sha256_hex field validator, extra="forbid" on ArrivalEnvelope, and
 # the Field(default_factory=list) default on allowed_groups). Changing accepted values
 # or formats requires a code change (and a new LLD/PR), not a config edit.

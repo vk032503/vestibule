@@ -40,7 +40,7 @@ errors:
 # documentation/audit visibility only, following the exact precedent set by
 # config/envelope.yaml's trust_tiers and config/ledger.yaml's legal_transitions: neither
 # is read at runtime to change behavior. The authoritative default-severity behavior is
-# hardcoded in ErrorRegistry.classify (ingestion/errors/registry.py); the authoritative
+# hardcoded in ErrorRegistry.classify (vestibule/errors/registry.py); the authoritative
 # code catalog is whatever has actually been registered into _DEFAULT_REGISTRY at
 # runtime, retrievable via all_codes(). This is a genuine safety-invariant carve-out for
 # the same reason as REQ-001/002/003's equivalents: a config edit alone must never be

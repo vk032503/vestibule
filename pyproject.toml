@@ -1,5 +1,5 @@
 [project]
-name = "rag-ingestion-framework"
+name = "vestibule"
 version = "0.2.0"
 requires-python = ">=3.11"
 dependencies = [
@@ -26,7 +26,7 @@ azure_search = [
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["ingestion"]
+testpaths = ["vestibule"]
 
 [[tool.mypy.overrides]]
 # PyMuPDF (fitz) ships a `py.typed` marker but its SWIG-generated bindings are only
@@ -35,11 +35,11 @@ testpaths = ["ingestion"]
 # Scoped to exactly the modules that call into PyMuPDF, so strict-mode checking is
 # unchanged everywhere else in this codebase.
 module = [
-    "ingestion.analyzer.detect",
-    "ingestion.analyzer.conftest",
-    "ingestion.analyzer.parsers.pymupdf_parser",
-    "ingestion.analyzer.parsers.test_pymupdf_parser",
-    "ingestion.indexer.test_e2e_pipeline",
+    "vestibule.analyzer.detect",
+    "vestibule.analyzer.conftest",
+    "vestibule.analyzer.parsers.pymupdf_parser",
+    "vestibule.analyzer.parsers.test_pymupdf_parser",
+    "vestibule.indexer.test_e2e_pipeline",
 ]
 disallow_untyped_calls = false
 
@@ -48,7 +48,7 @@ disallow_untyped_calls = false
 # by default, so it ships no resolvable type stubs in this environment. Scoped to
 # exactly the one module that lazily imports it, so strict-mode checking is unchanged
 # everywhere else in this codebase.
-module = ["ingestion.embedder.adapters.fastembed"]
+module = ["vestibule.embedder.adapters.fastembed"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
@@ -58,8 +58,8 @@ ignore_missing_imports = true
 # `_load_real_backend`/`_build_search_index`, never at module import time), so
 # strict-mode checking is unchanged everywhere else in this codebase.
 module = [
-    "ingestion.indexer.adapters.azure_ai_search",
-    "ingestion.indexer.adapters._azure_search_backend",
+    "vestibule.indexer.adapters.azure_ai_search",
+    "vestibule.indexer.adapters._azure_search_backend",
 ]
 ignore_missing_imports = true
 disable_error_code = ["import-untyped"]

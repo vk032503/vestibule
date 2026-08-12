@@ -3,7 +3,7 @@
 This folder is a market-tracking commitment, not a running benchmark harness (REQ-005
 LLD Assumption A8 / the story's "Market-awareness note"). It defines no class,
 function, error code, ledger state, or contract surface, and no code in the
-`ingestion.analyzer` package depends on this folder existing.
+`vestibule.analyzer` package depends on this folder existing.
 
 ## What a future benchmark run would measure
 
@@ -22,14 +22,14 @@ candidate adapter, against a labeled fixture set:
 
 ## How a candidate adapter is registered for a benchmark run
 
-The `ParserAdapter`/`ParserRegistry` design (`ingestion/analyzer/registry.py`)
+The `ParserAdapter`/`ParserRegistry` design (`vestibule/analyzer/registry.py`)
 deliberately makes this a registration-only exercise, never a change to `Analyzer`
 itself — the same swap-in mechanism this REQ's acceptance criteria (AC6) already
 requires and tests:
 
 ```python
-from ingestion.analyzer.model import DetectedType
-from ingestion.analyzer.registry import ParserRegistry
+from vestibule.analyzer.model import DetectedType
+from vestibule.analyzer.registry import ParserRegistry
 
 registry = ParserRegistry()
 registry.register(DetectedType.SCANNED_PDF, MyCandidateAdapter(...))
@@ -37,7 +37,7 @@ registry.register(DetectedType.SCANNED_PDF, MyCandidateAdapter(...))
 
 Any candidate — a future Docling adapter, an Unstructured adapter, a VLM-based parser,
 or a newer entrant — need only implement `ParserAdapter.parse(envelope, bytes_reader)
--> list[Element]` (`ingestion/analyzer/registry.py`) and register itself against the
+-> list[Element]` (`vestibule/analyzer/registry.py`) and register itself against the
 `DetectedType`(s) it targets. `Analyzer` dispatches purely by looking up the registered
 adapter; it never imports or references any specific adapter implementation.
 

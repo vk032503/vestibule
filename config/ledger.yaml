@@ -16,7 +16,7 @@ ledger:
 # - legal_transitions matches config/envelope.yaml / config/identity.yaml's established
 #   precedent exactly: it is listed for documentation/audit visibility only and is never
 #   read at runtime to change behavior. The authoritative FSM lives in _LEGAL_TRANSITIONS
-#   and validate_transition in ingestion/ledger/store.py. This is a genuine safety-invariant
+#   and validate_transition in vestibule/ledger/store.py. This is a genuine safety-invariant
 #   exception to "all tunables from config": the transition table is Contract #3's
 #   safety-critical invariant — a config edit alone must never be able to loosen which
 #   stage transitions are legal, since that would silently permit corrupt/out-of-order
