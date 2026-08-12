@@ -608,7 +608,7 @@ def test_is_benign_concurrent_loss_never_raises(
 
 
 def test_config_default_list_limit_matches_code_default() -> None:
-    config_path = Path(__file__).resolve().parents[2] / "config" / "ledger.yaml"
+    config_path = Path(__file__).resolve().parents[3] / "config" / "ledger.yaml"
     text = config_path.read_text(encoding="utf-8")
     match = re.search(r"default_list_limit:\s*(\d+)", text)
     assert match is not None

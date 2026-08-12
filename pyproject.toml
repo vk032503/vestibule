@@ -25,8 +25,14 @@ azure_search = [
     "azure-search-documents>=11.4,<12.0",
 ]
 
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
 [tool.pytest.ini_options]
-testpaths = ["vestibule"]
+testpaths = ["src/vestibule"]
 
 [[tool.mypy.overrides]]
 # PyMuPDF (fitz) ships a `py.typed` marker but its SWIG-generated bindings are only

@@ -7,7 +7,7 @@ identity:
 # NOTE: hash_algo and id_length are listed here for documentation/audit visibility only;
 # they are not read at runtime to change behavior. The authoritative algorithm is
 # hardcoded (hashlib.sha256) and the authoritative length check is _HEX_RE in
-# vestibule/identity/derive.py. This is deliberate: the derivation rule is a
+# src/vestibule/identity/derive.py. This is deliberate: the derivation rule is a
 # safety-critical, contract-defining invariant (Contract #2) — a config edit alone must
 # never be able to change how doc_id/chunk_id are computed, since that would silently
 # break idempotency for every document already indexed under the old scheme. Changing

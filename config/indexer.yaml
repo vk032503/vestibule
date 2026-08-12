@@ -6,7 +6,7 @@ indexer:
   dimensions: 1024              # operational tunable — code-authoritative, see below. MUST
                                  # match the configured EmbedderConfig.target_dimensions (or
                                  # the adapter's native output dimensions if no MRL truncation
-                                 # is applied) — see vestibule/indexer/indexer.py's module
+                                 # is applied) — see src/vestibule/indexer/indexer.py's module
                                  # docstring for why this is a flagged spec-gap resolution
   metric: cosine                # operational tunable — code-authoritative, see below
   hnsw:
@@ -42,7 +42,7 @@ indexer:
 # NOTE: dimensions, metric, batch_size, delete_before_upsert_on_version_change, and
 # retry.max_attempts/backoff_base_seconds/backoff_max_seconds are ordinary operational
 # tunables (no bearing on Contract #2/#3 correctness) — the authoritative defaults live
-# on IndexerConfig's/RetryConfig's dataclass fields (vestibule/indexer/indexer.py). This
+# on IndexerConfig's/RetryConfig's dataclass fields (src/vestibule/indexer/indexer.py). This
 # YAML block is kept in sync via a dedicated test
 # (test_config_indexer_yaml_tunables_match_indexer_config_defaults), following the exact
 # precedent config/embedder.yaml/config/chunker.yaml established (no config-loading
@@ -53,7 +53,7 @@ indexer:
 # story's own "Dimension consistency enforcement" section requires the orchestrator to
 # call `adapter.ensure_schema(dimensions, metric)` at construction time, which is
 # unimplementable without a `dimensions` value from somewhere. See
-# vestibule/indexer/indexer.py's module docstring / this REQ's PR description.
+# src/vestibule/indexer/indexer.py's module docstring / this REQ's PR description.
 #
 # adapter/index_name/hnsw.*/azure_ai_search.* select and configure which IndexerAdapter
 # the composition root constructs (out of scope here) — mirroring
@@ -65,4 +65,4 @@ indexer:
 #
 # error_codes follows the same documentation/audit-only convention as
 # config/errors.yaml's known_codes: not read at runtime; the registry populated via
-# register_error at import time (vestibule/indexer/model.py) is authoritative.
+# register_error at import time (src/vestibule/indexer/model.py) is authoritative.

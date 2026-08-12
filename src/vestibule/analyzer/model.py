@@ -6,11 +6,18 @@ immutable), `BytesReader` (the minimal seekable-byte-source Protocol parsers and
 `detect_type` need), and `AnalyzerError` (the single exception type this module raises,
 carrying a caller-supplied `error_code`).
 
-Failure taxonomy: this module registers all six of this REQ's error codes at import
-time (Contract #4) — two PERMANENT (`ANALYZER_UNSUPPORTED_TYPE`, `ANALYZER_NO_PARSER`)
-and four TRANSIENT (`PARSER_TIMEOUT`, `DOCINT_RATE_LIMITED`, `DOCINT_UPSTREAM_ERROR`,
-`PARSER_INTERNAL`). See `analyzer.py` for how each is raised and how the ledger is
-updated on each.
+Failure taxonomy: this module registers all seven of this REQ's error codes at import
+time (Contract #4) — three PERMANENT (`ANALYZER_UNSUPPORTED_TYPE`, `ANALYZER_NO_PARSER`,
+`ANALYZER_DEPENDENCY_MISSING`) and four TRANSIENT (`PARSER_TIMEOUT`,
+`DOCINT_RATE_LIMITED`, `DOCINT_UPSTREAM_ERROR`, `PARSER_INTERNAL`). See `analyzer.py`
+for how each is raised and how the ledger is updated on each.
+
+`ANALYZER_DEPENDENCY_MISSING` (issue #19) is a deliberate addition beyond REQ-005's
+original six-code list, matching the `EMBEDDER_DEPENDENCY_MISSING`/
+`INDEXER_DEPENDENCY_MISSING` pattern: `pymupdf` is a core (non-optional) dependency, but
+a broken/partial install (e.g. `--no-deps`) can still leave it missing at runtime, and
+Contract #4 requires every raised error to be classified rather than silently defaulting
+to TRANSIENT for a condition retrying can never fix.
 """
 
 from __future__ import annotations
@@ -23,6 +30,7 @@ from vestibule.errors.registry import RaggedError, Severity, register_error
 
 ANALYZER_UNSUPPORTED_TYPE = "ANALYZER_UNSUPPORTED_TYPE"
 ANALYZER_NO_PARSER = "ANALYZER_NO_PARSER"
+ANALYZER_DEPENDENCY_MISSING = "ANALYZER_DEPENDENCY_MISSING"
 PARSER_TIMEOUT = "PARSER_TIMEOUT"
 DOCINT_RATE_LIMITED = "DOCINT_RATE_LIMITED"
 DOCINT_UPSTREAM_ERROR = "DOCINT_UPSTREAM_ERROR"
@@ -92,15 +100,19 @@ class AnalyzerError(RaggedError):
     """Single exception type for every Analyzer-raised failure.
 
     Unlike REQ-004's fixed-code-per-class subclasses, `error_code` varies per raise
-    site (LLD Assumption A3) — one `AnalyzerError` class, six possible `error_code`
+    site (LLD Assumption A3) — one `AnalyzerError` class, seven possible `error_code`
     values.
 
     Attributes:
-        doc_id: The `doc_id` of the document being analyzed when this error occurred.
+        doc_id: The `doc_id` of the document being analyzed when this error occurred;
+            `""` for `ANALYZER_DEPENDENCY_MISSING`, which can occur before any document
+            is in scope (`detect_type`'s PDF sub-typing probe, or `PyMuPDFParser`
+            construction).
         reason: Human-readable failure reason.
         detected_type: The `DetectedType` this failure relates to, if known/relevant
             (populated for `ANALYZER_UNSUPPORTED_TYPE`/`ANALYZER_NO_PARSER`); `None`
-            otherwise.
+            otherwise (including `ANALYZER_DEPENDENCY_MISSING`, raised before type
+            detection can complete).
     """
 
     def __init__(
@@ -116,7 +128,7 @@ class AnalyzerError(RaggedError):
         Args:
             doc_id: The `doc_id` of the document being analyzed.
             reason: Human-readable failure reason.
-            error_code: One of this module's six registered error codes.
+            error_code: One of this module's seven registered error codes.
             detected_type: The `DetectedType` this failure relates to, if relevant.
         """
         self.doc_id = doc_id
@@ -136,6 +148,13 @@ register_error(
     Severity.PERMANENT,
     "a supported DetectedType has no ParserAdapter registered against it in the "
     "ParserRegistry — a registry misconfiguration (REQ-005)",
+)
+register_error(
+    ANALYZER_DEPENDENCY_MISSING,
+    Severity.PERMANENT,
+    "pymupdf (a core dependency) could not be imported when detect_type's PDF "
+    "sub-typing probe or PyMuPDFParser needed it — a broken/partial install, not a "
+    "per-document condition (issue #19)",
 )
 register_error(
     PARSER_TIMEOUT,

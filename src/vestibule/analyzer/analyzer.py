@@ -6,14 +6,21 @@ ledger transitions. It owns no parsing logic itself — delegates entirely to
 `ParserAdapter` implementations (house rules: "never parse documents ... in-house").
 
 Failure-path/ledger-write contract (LLD §3, §4 — the design-review-fixed core of this
-module): the two PERMANENT failure paths (`ANALYZER_UNSUPPORTED_TYPE`,
-`ANALYZER_NO_PARSER`) terminalize the ledger row to `Status.FAILED`. The four TRANSIENT
-failure paths (`PARSER_TIMEOUT`, `DOCINT_RATE_LIMITED`, `DOCINT_UPSTREAM_ERROR`,
-`PARSER_INTERNAL`) perform a same-status `analyzing -> analyzing` self-transition
-instead — never `Status.FAILED` — so a redelivered `analyze()` call remains re-enterable
-and `attempts` can keep incrementing for a coordinator's "poison after max dequeue"
-policy (out of scope here). Conflating the two would strand a `doc_id` at a terminal
-`failed` row after a merely-transient failure, defeating REQ-003's retry mechanism.
+module): the three PERMANENT failure paths (`ANALYZER_UNSUPPORTED_TYPE`,
+`ANALYZER_NO_PARSER`, `ANALYZER_DEPENDENCY_MISSING`) terminalize the ledger row to
+`Status.FAILED`. The four TRANSIENT failure paths (`PARSER_TIMEOUT`,
+`DOCINT_RATE_LIMITED`, `DOCINT_UPSTREAM_ERROR`, `PARSER_INTERNAL`) perform a same-status
+`analyzing -> analyzing` self-transition instead — never `Status.FAILED` — so a
+redelivered `analyze()` call remains re-enterable and `attempts` can keep incrementing
+for a coordinator's "poison after max dequeue" policy (out of scope here). Conflating
+the two would strand a `doc_id` at a terminal `failed` row after a merely-transient
+failure, defeating REQ-003's retry mechanism.
+
+`ANALYZER_DEPENDENCY_MISSING` (issue #19) is `detect_type`'s one exception to otherwise
+never raising: `_detect_and_parse` catches it specifically (unlike the parser-dispatch
+`AnalyzerError`s `_parse_with_recovery` catches, which are always TRANSIENT-treated via
+`_self_transition_and_raise`) and terminalizes, since a missing core dependency is a
+PERMANENT environment misconfiguration, not a retryable condition.
 """
 
 from __future__ import annotations
@@ -107,10 +114,11 @@ class Analyzer:
             The extracted `Element`s.
 
         Raises:
-            AnalyzerError: `ANALYZER_UNSUPPORTED_TYPE`/`ANALYZER_NO_PARSER` (PERMANENT,
-                ledger row ends `Status.FAILED`), or `PARSER_TIMEOUT`/
-                `DOCINT_RATE_LIMITED`/`DOCINT_UPSTREAM_ERROR`/`PARSER_INTERNAL`
-                (TRANSIENT, ledger row self-transitions and stays `Status.ANALYZING`).
+            AnalyzerError: `ANALYZER_UNSUPPORTED_TYPE`/`ANALYZER_NO_PARSER`/
+                `ANALYZER_DEPENDENCY_MISSING` (PERMANENT, ledger row ends
+                `Status.FAILED`), or `PARSER_TIMEOUT`/`DOCINT_RATE_LIMITED`/
+                `DOCINT_UPSTREAM_ERROR`/`PARSER_INTERNAL` (TRANSIENT, ledger row
+                self-transitions and stays `Status.ANALYZING`).
             LedgerTransitionInvalid: Propagated unchanged when the first ledger
                 transition fails for a reason `is_benign_concurrent_loss` classifies as
                 not benign (unknown `doc_id`, or a row already `Status.FAILED`).
@@ -161,12 +169,20 @@ class Analyzer:
         Raises:
             AnalyzerError: See `analyze`.
         """
-        detected_type = detect_type(
-            envelope,
-            bytes_reader,
-            scanned_pdf_probe_pages=self._config.scanned_pdf_probe_pages,
-            scanned_pdf_min_chars_per_page=self._config.scanned_pdf_min_chars_per_page,
-        )
+        try:
+            detected_type = detect_type(
+                envelope,
+                bytes_reader,
+                scanned_pdf_probe_pages=self._config.scanned_pdf_probe_pages,
+                scanned_pdf_min_chars_per_page=self._config.scanned_pdf_min_chars_per_page,
+            )
+        except AnalyzerError as exc:
+            # detect_type's sole documented exception to "never raises" (issue #19):
+            # ANALYZER_DEPENDENCY_MISSING, a PERMANENT environment-misconfiguration
+            # failure, not a per-document classification outcome. detected_type is
+            # unknown here (detection never completed), unlike the two PERMANENT
+            # codes _terminalize otherwise handles.
+            self._terminalize(doc_id, exc.error_code, exc.reason, None)
         if detected_type is DetectedType.UNSUPPORTED:
             self._terminalize(
                 doc_id,
@@ -187,15 +203,21 @@ class Analyzer:
         )
 
     def _terminalize(
-        self, doc_id: str, error_code: str, reason: str, detected_type: DetectedType
+        self,
+        doc_id: str,
+        error_code: str,
+        reason: str,
+        detected_type: DetectedType | None,
     ) -> NoReturn:
         """F1/F2: marks the ledger row `Status.FAILED` and raises `AnalyzerError`.
 
         Args:
             doc_id: The document's `doc_id` (ledger key).
-            error_code: `ANALYZER_UNSUPPORTED_TYPE` or `ANALYZER_NO_PARSER` (PERMANENT).
+            error_code: `ANALYZER_UNSUPPORTED_TYPE`, `ANALYZER_NO_PARSER`, or
+                `ANALYZER_DEPENDENCY_MISSING` (all PERMANENT).
             reason: Human-readable failure reason.
-            detected_type: The `DetectedType` this failure relates to.
+            detected_type: The `DetectedType` this failure relates to; `None` for
+                `ANALYZER_DEPENDENCY_MISSING`, raised before detection can complete.
 
         Raises:
             AnalyzerError: Always.

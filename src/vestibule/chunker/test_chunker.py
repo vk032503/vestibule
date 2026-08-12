@@ -536,7 +536,7 @@ def test_chunker_swaps_in_fake_strategy_with_no_orchestrator_code_changes() -> N
 
 
 def test_config_chunker_yaml_tunables_match_chunker_config_defaults() -> None:
-    config_path = Path(__file__).resolve().parents[2] / "config" / "chunker.yaml"
+    config_path = Path(__file__).resolve().parents[3] / "config" / "chunker.yaml"
     text = config_path.read_text(encoding="utf-8")
     defaults = ChunkerConfig()
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import logging
 import re
+import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -15,6 +16,7 @@ import vestibule.analyzer.analyzer as analyzer_module
 from vestibule.analyzer.analyzer import Analyzer, AnalyzerConfig
 from vestibule.analyzer.conftest import make_envelope
 from vestibule.analyzer.model import (
+    ANALYZER_DEPENDENCY_MISSING,
     ANALYZER_NO_PARSER,
     ANALYZER_UNSUPPORTED_TYPE,
     DOCINT_RATE_LIMITED,
@@ -212,6 +214,31 @@ def test_analyzer_analyze_no_registered_parser_raises_analyzer_error_permanent_l
     assert row is not None
     assert row.status == Status.FAILED
     assert row.last_error_code == ANALYZER_NO_PARSER
+
+
+def test_analyzer_analyze_missing_pymupdf_raises_analyzer_error_permanent_ledger_ends_failed(
+    monkeypatch: pytest.MonkeyPatch, digital_pdf_bytes: bytes
+) -> None:
+    """ANALYZER_DEPENDENCY_MISSING (issue #19): unlike the four TRANSIENT codes
+    `_parse_with_recovery` self-transitions on, `detect_type` raising this PERMANENT
+    code (simulated the same way `test_detect.py` does: `sys.modules["pymupdf"] = None`)
+    must be caught by `_detect_and_parse` itself and terminalize — proving the fix
+    doesn't leave the ledger row silently stuck at `Status.ANALYZING` (Contract #3)."""
+    monkeypatch.setitem(sys.modules, "pymupdf", None)
+    envelope = make_envelope("missing-pymupdf")
+    analyzer, ledger = _build_analyzer(_FakeParser(_SAMPLE_ELEMENTS))
+    _seed_pending(ledger, envelope)
+
+    with pytest.raises(AnalyzerError) as exc_info:
+        analyzer.analyze(envelope, _reader(digital_pdf_bytes))
+
+    assert exc_info.value.error_code == ANALYZER_DEPENDENCY_MISSING
+    assert exc_info.value.severity == Severity.PERMANENT
+    assert exc_info.value.detected_type is None
+    row = ledger.get(envelope.doc_id)
+    assert row is not None
+    assert row.status == Status.FAILED
+    assert row.last_error_code == ANALYZER_DEPENDENCY_MISSING
 
 
 # --- F3-F6 TRANSIENT failure paths (AC5) ------------------------------------------------
@@ -536,7 +563,7 @@ def test_analyzer_analyze_ledger_transition_invalid_non_benign_already_failed_pr
 
 
 def test_config_analyzer_yaml_tunables_match_analyzer_config_defaults() -> None:
-    config_path = Path(__file__).resolve().parents[2] / "config" / "analyzer.yaml"
+    config_path = Path(__file__).resolve().parents[3] / "config" / "analyzer.yaml"
     text = config_path.read_text(encoding="utf-8")
     defaults = AnalyzerConfig()
 

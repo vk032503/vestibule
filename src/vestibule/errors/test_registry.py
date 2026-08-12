@@ -420,7 +420,7 @@ def test_config_known_codes_matches_all_codes_after_importing_all_modules() -> N
     import vestibule.indexer.model  # noqa: F401
     import vestibule.ledger.store  # noqa: F401
 
-    config_path = Path(__file__).resolve().parents[2] / "config" / "errors.yaml"
+    config_path = Path(__file__).resolve().parents[3] / "config" / "errors.yaml"
     text = config_path.read_text(encoding="utf-8")
     match = re.search(r"known_codes:.*?\n((?:\s+[A-Z_]+:\s*\w+\n)+)", text, re.DOTALL)
     assert match is not None

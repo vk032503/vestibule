@@ -753,7 +753,7 @@ def test_property_wellformed_embedded_chunks_produce_matching_store_count(
 
 
 def test_config_indexer_yaml_tunables_match_indexer_config_defaults() -> None:
-    config_path = Path(__file__).resolve().parents[2] / "config" / "indexer.yaml"
+    config_path = Path(__file__).resolve().parents[3] / "config" / "indexer.yaml"
     text = config_path.read_text(encoding="utf-8")
     defaults = IndexerConfig()
     retry_defaults = RetryConfig()

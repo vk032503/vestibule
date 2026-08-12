@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import io
+import sys
 
 import pymupdf
 import pytest
 
 from vestibule.analyzer.conftest import make_envelope
-from vestibule.analyzer.model import ElementType
+from vestibule.analyzer.model import (
+    ANALYZER_DEPENDENCY_MISSING,
+    AnalyzerError,
+    ElementType,
+)
 from vestibule.analyzer.parsers.pymupdf_parser import PyMuPDFParser, _page_elements
 
 _envelope = make_envelope("pymupdf-parser")
@@ -86,3 +91,25 @@ def test_page_elements_skips_blocks_with_no_extractable_text() -> None:
     elements = _page_elements(page, page_index=0)
     assert len(elements) == 1
     assert elements[0].text == "Real text"
+
+
+# --- ANALYZER_DEPENDENCY_MISSING (issue #19): fail fast at construction, not parse() ------
+
+
+def test_pymupdf_parser_construction_without_pymupdf_raises_analyzer_dependency_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Simulates `pymupdf` being uninstalled the same way `test_detect.py` does:
+    `sys.modules["pymupdf"] = None` makes any subsequent `import pymupdf` raise
+    `ImportError`. Must fail at `PyMuPDFParser()` construction, not at `.parse()` —
+    raising mid-`parse()` would flow through `Analyzer._parse_with_recovery`, which
+    treats every caught `AnalyzerError` as TRANSIENT regardless of its actual declared
+    severity, incorrectly self-transitioning instead of terminalizing a PERMANENT
+    dependency failure.
+    """
+    monkeypatch.setitem(sys.modules, "pymupdf", None)
+
+    with pytest.raises(AnalyzerError) as exc_info:
+        PyMuPDFParser()
+
+    assert exc_info.value.error_code == ANALYZER_DEPENDENCY_MISSING

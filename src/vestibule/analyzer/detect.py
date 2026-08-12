@@ -6,18 +6,30 @@ open + `get_text` probe of the first few pages: too little extractable text impl
 scanned/image-only PDF that needs OCR (`DocumentIntelligenceParser`) rather than direct
 text extraction (`PyMuPDFParser`).
 
-`detect_type` never raises: unrecognized, corrupt, or encrypted input resolves to
-`DetectedType.UNSUPPORTED`, a return value, not an exception. `Analyzer` is the sole
-raise site for `ANALYZER_UNSUPPORTED_TYPE` (LLD §3).
+`detect_type` never raises for anything about the *document*: unrecognized, corrupt, or
+encrypted input resolves to `DetectedType.UNSUPPORTED`, a return value, not an
+exception. `Analyzer` is the sole raise site for `ANALYZER_UNSUPPORTED_TYPE` (LLD §3).
+
+One deliberate, narrow exception (issue #19): `pymupdf` is imported lazily, only inside
+the PDF sub-typing probe that needs it, so importing this module never hard-fails if
+`pymupdf` is somehow missing (it is a core dependency, but a broken/partial install can
+still lack it). A missing `pymupdf` is an *environment* misconfiguration, not a
+per-document classification outcome, so it raises `AnalyzerError`
+(`ANALYZER_DEPENDENCY_MISSING`, PERMANENT) rather than resolving to `UNSUPPORTED` —
+`Analyzer._detect_and_parse` catches this specific case and terminalizes the ledger row,
+same as `ANALYZER_UNSUPPORTED_TYPE`/`ANALYZER_NO_PARSER`.
 """
 
 from __future__ import annotations
 
 import logging
 
-import pymupdf
-
-from vestibule.analyzer.model import BytesReader, DetectedType
+from vestibule.analyzer.model import (
+    ANALYZER_DEPENDENCY_MISSING,
+    AnalyzerError,
+    BytesReader,
+    DetectedType,
+)
 from vestibule.envelope.model import ArrivalEnvelope
 
 logger = logging.getLogger(__name__)
@@ -55,8 +67,12 @@ def detect_type(
 
     Returns:
         The detected `DetectedType`. Unrecognized magic bytes, an encrypted PDF, a
-        corrupt PDF, or an empty stream all resolve to `DetectedType.UNSUPPORTED` — this
-        function never raises.
+        corrupt PDF, or an empty stream all resolve to `DetectedType.UNSUPPORTED`.
+
+    Raises:
+        AnalyzerError: `ANALYZER_DEPENDENCY_MISSING` (PERMANENT) if `pymupdf` cannot be
+            imported while sub-typing a PDF — the one deliberate exception to this
+            function otherwise never raising (module docstring).
     """
     bytes_reader.seek(0)
     header = bytes_reader.read(_MAGIC_HEADER_BYTES)
@@ -92,7 +108,22 @@ def _detect_pdf_subtype(
         `DetectedType.UNSUPPORTED` if the PDF is encrypted, corrupt, or has zero pages;
         otherwise `DetectedType.SCANNED_PDF` or `DetectedType.DIGITAL_PDF` per the
         average-characters-per-page threshold.
+
+    Raises:
+        AnalyzerError: `ANALYZER_DEPENDENCY_MISSING` (PERMANENT) if `pymupdf` is not
+            importable.
     """
+    try:
+        import pymupdf
+    except ImportError as exc:
+        raise AnalyzerError(
+            doc_id,
+            "pymupdf could not be imported to sub-type this PDF; it is a core "
+            "dependency of vestibule — reinstall with `pip install -e .` (or "
+            "`pip install vestibule`) to restore it",
+            error_code=ANALYZER_DEPENDENCY_MISSING,
+        ) from exc
+
     try:
         with pymupdf.open(stream=data, filetype="pdf") as doc:
             if doc.needs_pass or doc.page_count == 0:

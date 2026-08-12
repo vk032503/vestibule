@@ -531,7 +531,7 @@ def test_embed_ledger_transition_invalid_non_benign_propagates_unchanged() -> No
 
 
 def test_config_embedder_yaml_tunables_match_embedder_config_defaults() -> None:
-    config_path = Path(__file__).resolve().parents[2] / "config" / "embedder.yaml"
+    config_path = Path(__file__).resolve().parents[3] / "config" / "embedder.yaml"
     text = config_path.read_text(encoding="utf-8")
     defaults = EmbedderConfig()
     retry_defaults = RetryConfig()

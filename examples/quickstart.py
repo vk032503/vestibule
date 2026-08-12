@@ -39,12 +39,7 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-# The project isn't installed as a package (no pip/uv editable install; pytest's
-# rootdir-based discovery is what normally puts `vestibule` on sys.path) — replicate
-# that here so `python examples/quickstart.py` works from a plain clone.
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from vestibule.analyzer.analyzer import Analyzer, AnalyzerConfig  # noqa: E402
+from vestibule.analyzer.analyzer import Analyzer, AnalyzerConfig
 from vestibule.analyzer.model import DetectedType, Element, ElementType
 from vestibule.analyzer.parsers.pymupdf_parser import PyMuPDFParser
 from vestibule.analyzer.registry import ParserRegistry

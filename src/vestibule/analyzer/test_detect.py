@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import io
+import sys
 
 import pytest
 
 from vestibule.analyzer.conftest import make_envelope, pdf_bytes_with_char_count
 from vestibule.analyzer.detect import detect_type
-from vestibule.analyzer.model import BytesReader, DetectedType
+from vestibule.analyzer.model import (
+    ANALYZER_DEPENDENCY_MISSING,
+    AnalyzerError,
+    BytesReader,
+    DetectedType,
+)
 
 _PROBE_PAGES = 3
 _MIN_CHARS_PER_PAGE = 50
@@ -84,6 +90,38 @@ def test_detect_type_pdf_below_char_threshold_classified_scanned() -> None:
 def test_detect_type_pdf_above_char_threshold_classified_digital() -> None:
     data = pdf_bytes_with_char_count(500)
     assert _detect(data, min_chars=50) == DetectedType.DIGITAL_PDF
+
+
+# --- ANALYZER_DEPENDENCY_MISSING (issue #19): the one deliberate exception to
+# --- detect_type otherwise never raising --------------------------------------------------
+
+
+def test_detect_type_pdf_without_pymupdf_raises_analyzer_dependency_missing_permanent(
+    monkeypatch: pytest.MonkeyPatch, digital_pdf_bytes: bytes
+) -> None:
+    """Simulates `pymupdf` being uninstalled: `sys.modules["pymupdf"] = None` makes
+    Python's import system raise `ImportError` for any subsequent `import pymupdf`,
+    exactly like a genuinely missing package — pymupdf is a core dependency and is
+    always installed in this test environment, so this is the only hermetic way to
+    exercise the lazy-import fail path (same technique as
+    `test_fastembed.py`'s `_SlowTextEmbedding` fake-module tests)."""
+    monkeypatch.setitem(sys.modules, "pymupdf", None)
+
+    with pytest.raises(AnalyzerError) as exc_info:
+        _detect(digital_pdf_bytes)
+
+    assert exc_info.value.error_code == ANALYZER_DEPENDENCY_MISSING
+    assert exc_info.value.detected_type is None
+
+
+def test_detect_type_non_pdf_input_unaffected_by_missing_pymupdf(
+    monkeypatch: pytest.MonkeyPatch, docx_bytes: bytes
+) -> None:
+    """Non-PDF magic-byte classification never touches `pymupdf` at all, so it must
+    stay unaffected regardless of whether `pymupdf` is importable."""
+    monkeypatch.setitem(sys.modules, "pymupdf", None)
+
+    assert _detect(docx_bytes) == DetectedType.DOCX
 
 
 @pytest.mark.parametrize(

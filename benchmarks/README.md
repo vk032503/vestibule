@@ -22,7 +22,7 @@ candidate adapter, against a labeled fixture set:
 
 ## How a candidate adapter is registered for a benchmark run
 
-The `ParserAdapter`/`ParserRegistry` design (`vestibule/analyzer/registry.py`)
+The `ParserAdapter`/`ParserRegistry` design (`src/vestibule/analyzer/registry.py`)
 deliberately makes this a registration-only exercise, never a change to `Analyzer`
 itself — the same swap-in mechanism this REQ's acceptance criteria (AC6) already
 requires and tests:
@@ -37,7 +37,7 @@ registry.register(DetectedType.SCANNED_PDF, MyCandidateAdapter(...))
 
 Any candidate — a future Docling adapter, an Unstructured adapter, a VLM-based parser,
 or a newer entrant — need only implement `ParserAdapter.parse(envelope, bytes_reader)
--> list[Element]` (`vestibule/analyzer/registry.py`) and register itself against the
+-> list[Element]` (`src/vestibule/analyzer/registry.py`) and register itself against the
 `DetectedType`(s) it targets. `Analyzer` dispatches purely by looking up the registered
 adapter; it never imports or references any specific adapter implementation.
 

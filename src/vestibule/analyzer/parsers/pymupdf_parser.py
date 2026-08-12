@@ -4,15 +4,29 @@ Extracts text with page/paragraph boundaries; maps text blocks to
 `Element(HEADING | PARAGRAPH, ...)` using PyMuPDF's own block/font-size signals only —
 no custom layout algorithm (house rules: "adapters thin", "never ... implement chunking
 algorithms" applies equally to layout classification here).
+
+`pymupdf` is imported lazily, inside `__init__` rather than at module load (issue #19):
+importing this module never hard-fails if `pymupdf` is somehow missing (it is a core
+dependency, but a broken/partial install can still lack it), and constructing
+`PyMuPDFParser()` fails fast with `AnalyzerError` (`ANALYZER_DEPENDENCY_MISSING`,
+PERMANENT) at composition-root time — before `Analyzer.analyze()` is ever called with it
+registered — rather than raising mid-`parse()`, where `Analyzer._parse_with_recovery`
+would incorrectly treat any `AnalyzerError` as TRANSIENT (matches the
+`FastEmbedEmbedder`/`AzureAISearchIndexer` fail-fast-at-construction pattern).
 """
 
 from __future__ import annotations
 
+import types
 from typing import Any
 
-import pymupdf
-
-from vestibule.analyzer.model import BytesReader, Element, ElementType
+from vestibule.analyzer.model import (
+    ANALYZER_DEPENDENCY_MISSING,
+    AnalyzerError,
+    BytesReader,
+    Element,
+    ElementType,
+)
 from vestibule.analyzer.registry import ParserAdapter
 from vestibule.envelope.model import ArrivalEnvelope
 
@@ -21,6 +35,15 @@ _HEADING_FONT_SIZE_THRESHOLD = 14.0
 
 class PyMuPDFParser(ParserAdapter):
     """Routes for `DetectedType.DIGITAL_PDF`. Thin wrap of PyMuPDF (`fitz`)."""
+
+    def __init__(self) -> None:
+        """Fails fast if `pymupdf` is not importable.
+
+        Raises:
+            AnalyzerError: `ANALYZER_DEPENDENCY_MISSING` (PERMANENT) if `pymupdf` is
+                not importable.
+        """
+        self._pymupdf: types.ModuleType = _import_pymupdf()
 
     def parse(
         self, envelope: ArrivalEnvelope, bytes_reader: BytesReader
@@ -39,10 +62,31 @@ class PyMuPDFParser(ParserAdapter):
         bytes_reader.seek(0)
         data = bytes_reader.read()
         elements: list[Element] = []
-        with pymupdf.open(stream=data, filetype="pdf") as doc:
+        with self._pymupdf.open(stream=data, filetype="pdf") as doc:
             for page_index in range(doc.page_count):
                 elements.extend(_page_elements(doc[page_index], page_index))
         return elements
+
+
+def _import_pymupdf() -> types.ModuleType:
+    """Imports and returns the `pymupdf` module, or raises `AnalyzerError`.
+
+    Raises:
+        AnalyzerError: `ANALYZER_DEPENDENCY_MISSING` (PERMANENT) if `pymupdf` is not
+            importable.
+    """
+    try:
+        import pymupdf
+
+        return pymupdf
+    except ImportError as exc:
+        raise AnalyzerError(
+            "",
+            "pymupdf could not be imported to construct PyMuPDFParser; it is a core "
+            "dependency of vestibule — reinstall with `pip install -e .` (or "
+            "`pip install vestibule`) to restore it",
+            error_code=ANALYZER_DEPENDENCY_MISSING,
+        ) from exc
 
 
 def _page_elements(page: Any, page_index: int) -> list[Element]:
