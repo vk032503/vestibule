@@ -414,8 +414,10 @@ def test_config_known_codes_matches_all_codes_after_importing_all_modules() -> N
     # comparing against config/errors.yaml's known_codes block.
     import ingestion.analyzer.model  # noqa: F401
     import ingestion.chunker.model  # noqa: F401
+    import ingestion.embedder.model  # noqa: F401
     import ingestion.envelope.model  # noqa: F401
     import ingestion.identity.derive  # noqa: F401
+    import ingestion.indexer.model  # noqa: F401
     import ingestion.ledger.store  # noqa: F401
 
     config_path = Path(__file__).resolve().parents[2] / "config" / "errors.yaml"
