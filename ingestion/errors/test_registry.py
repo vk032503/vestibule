@@ -413,6 +413,7 @@ def test_config_known_codes_matches_all_codes_after_importing_all_modules() -> N
     # Import every module that registers its own codes into _DEFAULT_REGISTRY before
     # comparing against config/errors.yaml's known_codes block.
     import ingestion.analyzer.model  # noqa: F401
+    import ingestion.chunker.model  # noqa: F401
     import ingestion.envelope.model  # noqa: F401
     import ingestion.identity.derive  # noqa: F401
     import ingestion.ledger.store  # noqa: F401
