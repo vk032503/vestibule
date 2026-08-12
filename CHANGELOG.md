@@ -6,6 +6,36 @@ Versioning: [SemVer](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- REQ-008: Indexer (`Indexer`, `IndexerConfig`, `RetryConfig`) — the fourth and final
+  Phase 2 component, consuming the Embedder's `list[EmbeddedChunk]` output and writing
+  `IndexRecord`s (flat, store-agnostic; carries `allowed_groups`/`trust_tier` security-
+  trimming metadata and `embedding_model`/`embedding_dimensions`/`config_version`
+  provenance from the envelope/ledger). An `IndexerAdapter` ABC (`upsert` returning
+  per-item `UpsertOutcome`, `delete_by_doc_id`, `count_by_doc_id`, `get_doc_version`,
+  `ensure_schema`) and two adapters: `AzureAISearchIndexer` (production, HNSW/cosine
+  vector index via the optional `azure-search-documents` dependency — the new
+  `azure_search` extra, lazily imported so the base install never hard-fails without
+  it; in-adapter `tenacity` retry honoring `Retry-After`) and `InMemoryIndexer` (local,
+  credentials-free, thread-safe, includes a brute-force cosine `search()` used to prove
+  retrieval works end-to-end). Delete-before-upsert on `doc_version` change prevents
+  orphan chunks when a document shrinks; dimension-mismatch and mixed-embedding-model
+  batches are rejected before any write (`INDEXER_DIMENSION_MISMATCH`,
+  `INDEXER_MIXED_MODEL_BATCH`, both PERMANENT). Owns exactly the
+  `indexing -> indexed` exit ledger transition (`Embedder` already performs the
+  `indexing` entry write); same-status `indexing -> indexing` self-transitions on every
+  TRANSIENT failure (`INDEXER_RATE_LIMITED`, `INDEXER_UPSTREAM_ERROR`,
+  `INDEXER_TIMEOUT`, `INDEXER_PARTIAL_BATCH_FAILURE`, `INDEXER_INTERNAL`); the five
+  PERMANENT failures (`INDEXER_EMPTY_RECORDS`, `INDEXER_DIMENSION_MISMATCH`,
+  `INDEXER_MIXED_MODEL_BATCH`, `INDEXER_SCHEMA_CONFLICT`, `INDEXER_RECORD_TOO_LARGE`)
+  terminalize the ledger row to `failed`, each triaged via `is_benign_concurrent_loss`
+  (REQ-006/007/issue #9 pattern). Adds `config/indexer.yaml` and the
+  `azure-search-documents` optional `azure_search` extra. `IndexRecord.doc_version`
+  resolves a spec gap by reusing `envelope.content_hash` (REQ-001's `ArrivalEnvelope`
+  has no `doc_version` field and adding one is out of scope here);
+  `IndexRecord.config_version` resolves a second spec gap by reading the current
+  `LedgerRow.config_version` at index time. Adds the end-to-end pipeline integration
+  test (envelope -> Analyzer -> Chunker -> Embedder(FastEmbed) -> Indexer(in-memory) ->
+  `search()`) proving Phase 2 works with zero cloud credentials configured.
 - REQ-007: Embedder (`Embedder`, `EmbedderConfig`, `RetryConfig`) — the third Phase 2
   component, consuming the Chunker's `list[Chunk]` output and producing
   `list[EmbeddedChunk]` (a frozen pydantic model wrapping `Chunk` with `vector`,
@@ -62,6 +92,10 @@ Versioning: [SemVer](https://semver.org/).
   `failed`. Adds `config/analyzer.yaml` and `benchmarks/README.md`.
 
 ### Changed
+- `config/errors.yaml`'s `known_codes` audit block now also lists REQ-008's eleven
+  error codes, and the corresponding cross-module sync test now also imports
+  `ingestion.indexer.model` — both are registered into the same process-wide error
+  registry REQ-004 established.
 - `config/errors.yaml`'s `known_codes` audit block now also lists REQ-007's eight
   error codes, and the corresponding cross-module sync test now also imports
   `ingestion.embedder.model` — both are registered into the same process-wide error
