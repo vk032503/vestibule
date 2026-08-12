@@ -6,6 +6,23 @@ Versioning: [SemVer](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- REQ-006: Chunker (`Chunker`, `ChunkerConfig`) — the second Phase 2 component,
+  consuming the Analyzer's `list[Element]` output. Three `ChunkStrategy`
+  implementations (`RecursiveChunkStrategy`, thin-wrapping
+  `langchain_text_splitters.RecursiveCharacterTextSplitter`; `StructureAwareChunkStrategy`,
+  flat single-active-heading `section_path` bookkeeping; `TableAtomicChunkStrategy`,
+  one markdown-serialized chunk per table, never split), a `TokenCounter`
+  Protocol/`TiktokenCounter` thin wrap of `tiktoken`, and the `Chunk`/`ChunkDraft`
+  value objects. Owns exactly the `chunking -> embedding` exit ledger transition
+  (`Analyzer` already performs the `chunking` entry write); same-status
+  `chunking -> chunking` self-transitions on every TRANSIENT failure
+  (`TOKENIZER_LOAD_FAILED`, `CHUNKER_INTERNAL`); the one PERMANENT failure
+  (`CHUNKER_EMPTY_ELEMENTS`) terminalizes the ledger row to `failed`, itself triaged via
+  `is_benign_concurrent_loss` (unlike REQ-005's `Analyzer._terminalize`, tracked
+  separately as issue #9). An oversized table logs a structured `"oversized_table"`
+  warning and is emitted anyway — deliberately not a registered `ErrorRegistry` code.
+  Adds `config/chunker.yaml`, and the `tiktoken`/`langchain-text-splitters`
+  dependencies.
 - REQ-005: Document Analyzer (`Analyzer`, `AnalyzerConfig`) — the first Phase 2
   component. Type detection (`detect_type`), the `ParserAdapter`/`ParserRegistry`
   contract, and two adapters (`PyMuPDFParser` for digital PDFs, thin-wrapping
@@ -19,6 +36,10 @@ Versioning: [SemVer](https://semver.org/).
   `failed`. Adds `config/analyzer.yaml` and `benchmarks/README.md`.
 
 ### Changed
+- `config/errors.yaml`'s `known_codes` audit block now also lists REQ-006's three
+  error codes, and the corresponding cross-module sync test now also imports
+  `ingestion.chunker.model` — both are registered into the same process-wide error
+  registry REQ-004 established.
 - `config/errors.yaml`'s `known_codes` audit block now also lists REQ-005's six error
   codes, and the corresponding cross-module sync test now imports
   `ingestion.analyzer.model` — both are registered into the same process-wide error

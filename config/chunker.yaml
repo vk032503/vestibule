@@ -1,0 +1,27 @@
+chunker:
+  target_chunk_tokens: 512    # operational tunable — code-authoritative, see below
+  overlap_tokens: 64          # operational tunable — code-authoritative, see below
+  min_chunk_tokens: 40        # operational tunable — code-authoritative, see below
+  max_chunk_tokens: 800       # operational tunable — code-authoritative, see below
+  token_counter: tiktoken_cl100k   # factory key -> build_token_counter(); MUST match the
+                                   # embedding model's tokenizer (REQ-007) once that config exists
+  error_codes:
+    CHUNKER_EMPTY_ELEMENTS: PERMANENT
+    TOKENIZER_LOAD_FAILED: TRANSIENT
+    CHUNKER_INTERNAL: TRANSIENT
+    # CHUNKER_OVERSIZED_TABLE is deliberately absent — it is a structured-log advisory
+    # only (Assumption A3, design-review BLOCKER fix), never a registered ErrorRegistry
+    # code; see the "oversized_table" log event in
+    # ingestion/chunker/strategies/table_atomic.py.
+
+# NOTE: target_chunk_tokens, overlap_tokens, min_chunk_tokens, max_chunk_tokens, and
+# token_counter are ordinary operational tunables (no bearing on Contract #2/#3
+# correctness) — the authoritative defaults live on ChunkerConfig's dataclass fields
+# (ingestion/chunker/chunker.py). This YAML block is kept in sync via a dedicated test
+# (test_config_chunker_yaml_tunables_match_chunker_config_defaults), following the exact
+# precedent config/analyzer.yaml established (no config-loading mechanism exists
+# anywhere in this codebase yet).
+#
+# error_codes follows the same documentation/audit-only convention as
+# config/errors.yaml's known_codes: not read at runtime; the registry populated via
+# register_error at import time (ingestion/chunker/model.py) is authoritative.

@@ -13,6 +13,9 @@ errors:
     DOCINT_RATE_LIMITED: TRANSIENT
     DOCINT_UPSTREAM_ERROR: TRANSIENT
     PARSER_INTERNAL: TRANSIENT
+    CHUNKER_EMPTY_ELEMENTS: PERMANENT
+    TOKENIZER_LOAD_FAILED: TRANSIENT
+    CHUNKER_INTERNAL: TRANSIENT
 
 # NOTE: unknown_code_default_severity and known_codes are listed here for
 # documentation/audit visibility only, following the exact precedent set by
