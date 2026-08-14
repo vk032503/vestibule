@@ -32,6 +32,40 @@ jobs:
           pip install pytest pytest-cov
           pytest --cov=src --cov-report=term || true
 
+  smoke-install:
+    name: smoke-install
+    runs-on: ubuntu-latest
+    # Hermetic unit tests verify internal consistency; they run against the dev venv,
+    # which already has every dependency present and the package importable via
+    # pytest's rootdir-based sys.path insertion — never via a real `pip install`. Three
+    # shipped bugs (an uninstallable package from a flat-layout setuptools error, a
+    # FastEmbed default model name real `fastembed` rejects, a pymupdf import at module
+    # load with no optional-extra guard) all passed that suite while breaking the
+    # actual path a stranger takes: clone, `pip install`, run the example. This job
+    # exists to catch exactly that class of bug — real install, real import, real run,
+    # from outside the dev environment and outside the repo.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Create a clean virtualenv (not the dev environment)
+        run: python -m venv /tmp/smoke-venv
+      - name: pip install ".[local]" — non-editable, the actual path a user takes
+        run: |
+          source /tmp/smoke-venv/bin/activate
+          python -m pip install --upgrade pip
+          pip install ".[local]"
+      - name: import vestibule from outside the repo
+        run: |
+          source /tmp/smoke-venv/bin/activate
+          cd /tmp
+          python -c "import vestibule; print(vestibule.__file__)"
+      - name: Run examples/quickstart.py end to end
+        run: |
+          source /tmp/smoke-venv/bin/activate
+          python examples/quickstart.py
+
   changelog:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
