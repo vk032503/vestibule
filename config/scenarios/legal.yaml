@@ -1,0 +1,31 @@
+# Example scenario for the "legal" vertical — a shipped, runnable example (AC1).
+# Deliberately different chunker/ACL/trust-tier settings from hr.yaml (AC2: verticals
+# are configured, and retrievable, independently of one another).
+scenario_id: legal-contracts-v1
+vertical: legal
+config_version: "1"
+index_name: vestibule-legal-v1
+
+chunker:
+  target_chunk_tokens: 256
+  overlap_tokens: 32
+  min_chunk_tokens: 20
+  max_chunk_tokens: 400
+
+embedder:
+  adapter: fastembed
+  model: nomic-ai/nomic-embed-text-v1.5
+  target_dimensions: null
+
+indexer:
+  metric: cosine
+  dimensions: 768
+  hnsw_m: 8
+  hnsw_ef_construction: 500
+  hnsw_ef_search: 600
+
+acl_source: blob_metadata
+default_trust_tier: confidential
+enabled: true
+created_at: "2026-08-12T00:00:00+00:00"
+updated_at: "2026-08-12T00:00:00+00:00"

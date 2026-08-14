@@ -11,18 +11,23 @@ dependencies = [
     "langchain-text-splitters>=0.3,<0.4",
     "openai>=1.50,<2.0",
     "tenacity>=9.0,<10.0",
+    "pyyaml>=6.0,<7.0",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
     "hypothesis>=6.0",
+    "types-PyYAML>=6.0",
 ]
 local = [
     "fastembed>=0.4,<1.0",
 ]
 azure_search = [
     "azure-search-documents>=11.4,<12.0",
+]
+table_storage = [
+    "azure-data-tables>=12.4,<13.0",
 ]
 
 [tool.setuptools]
@@ -67,5 +72,15 @@ module = [
     "vestibule.indexer.adapters.azure_ai_search",
     "vestibule.indexer.adapters._azure_search_backend",
 ]
+ignore_missing_imports = true
+disable_error_code = ["import-untyped"]
+
+[[tool.mypy.overrides]]
+# azure-data-tables is an optional dependency (the "table_storage" extra, REQ-010) and
+# is not installed by default, so it ships no resolvable type stubs in this
+# environment. Scoped to exactly the one module that lazily imports it (only inside
+# `_load_real_backend`/`_RealTableBackend`'s own methods, never at module import time),
+# so strict-mode checking is unchanged everywhere else in this codebase.
+module = ["vestibule.scenario.stores._azure_table_backend"]
 ignore_missing_imports = true
 disable_error_code = ["import-untyped"]

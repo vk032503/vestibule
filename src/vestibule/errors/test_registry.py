@@ -419,6 +419,7 @@ def test_config_known_codes_matches_all_codes_after_importing_all_modules() -> N
     import vestibule.identity.derive  # noqa: F401
     import vestibule.indexer.model  # noqa: F401
     import vestibule.ledger.store  # noqa: F401
+    import vestibule.scenario.model  # noqa: F401
 
     config_path = Path(__file__).resolve().parents[3] / "config" / "errors.yaml"
     text = config_path.read_text(encoding="utf-8")
