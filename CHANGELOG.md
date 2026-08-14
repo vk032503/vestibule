@@ -6,7 +6,12 @@ Versioning: [SemVer](https://semver.org/).
 ## [Unreleased]
 
 ### Added
-- _(none yet)_
+- REQ-010: Scenario Config Store — per-vertical ingestion settings (`Scenario`), read at runtime,
+  independent of redeployment. `YamlScenarioStore` (read-only, file-backed) and
+  `TableStorageScenarioStore` (writable, Azure Table Storage-backed, optimistic concurrency via
+  ETag) backends, plus a `CachedScenarioStore` TTL-cache decorator. Dimension-consistency
+  validation (`embedder.target_dimensions`/`indexer.dimensions`) runs at scenario construction —
+  fail-fast, before any document is ever ingested.
 
 ### Changed
 - _(none yet)_

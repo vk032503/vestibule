@@ -1,0 +1,30 @@
+# Example scenario for the "hr" vertical — a shipped, runnable example (AC1).
+# Loaded by YamlScenarioStore(directory="config/scenarios") at construction.
+scenario_id: hr-policies-v1
+vertical: hr
+config_version: "1"
+index_name: vestibule-hr-v1
+
+chunker:
+  target_chunk_tokens: 512
+  overlap_tokens: 64
+  min_chunk_tokens: 40
+  max_chunk_tokens: 800
+
+embedder:
+  adapter: azure_openai
+  model: text-embedding-3-large
+  target_dimensions: 1024
+
+indexer:
+  metric: cosine
+  dimensions: 1024
+  hnsw_m: 4
+  hnsw_ef_construction: 400
+  hnsw_ef_search: 500
+
+acl_source: envelope
+default_trust_tier: internal
+enabled: true
+created_at: "2026-08-12T00:00:00+00:00"
+updated_at: "2026-08-12T00:00:00+00:00"
