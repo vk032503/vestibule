@@ -5,6 +5,24 @@ journey through the pipeline FSM: ``pending -> analyzing -> chunking -> embeddin
 indexing -> indexed | failed``. Every stage transition is recorded (stage, attempts,
 error_code, updated_at) — no silent state (CLAUDE.md Contract #3).
 
+REQ-009 (Vertical Loader) additively extends this FSM with ``Status.NEEDS_REVIEW`` and
+its transitions (``pending -> needs_review``, ``needs_review -> pending``,
+``needs_review -> failed``) — a document whose vertical/scenario cannot be confidently
+determined is parked for human review rather than guessed at. This is a real, in-place
+edit to this already-merged module's transition table, not new code in a new module; see
+``docs/designs/REQ-003-lld.md``'s ``## Revision note`` (third entry) and
+``docs/stories/REQ-009.md`` for the full rationale. ``NEEDS_REVIEW`` is deliberately
+**not** added to ``_TERMINAL_STATUSES`` — a parked document can still return to the
+pipeline, which is the entire point of a review queue.
+
+REQ-009 additionally extends ``LedgerRow`` with ``assigned_scenario_id`` (and threads a
+matching optional ``assigned_scenario_id`` keyword through ``LedgerStore.transition()``)
+so a human's ``vestibule.vertical.review_queue.ReviewQueue.assign()`` decision is recorded
+durably on the row itself, rather than nowhere — see ``LedgerRow``'s own docstring for
+this field's lifecycle and ``transition()``'s docstring for how every other, unrelated
+caller in this codebase (Analyzer, Chunker, Embedder, Indexer, ``VerticalLoader`` itself)
+leaves it untouched by omitting the parameter.
+
 This module owns the FSM: the legal-transition table (``_LEGAL_TRANSITIONS``) and its
 enforcement (``validate_transition``) live here, once, for every backend to reuse
 (``LedgerStore`` is the persistence port; ``InMemoryLedgerStore`` is the only backend in
@@ -14,7 +32,9 @@ this phase). ``doc_id`` shape is validated by delegating to
 Failure taxonomy: every illegal-transition failure in this module raises
 ``LedgerTransitionInvalid``, classified PERMANENT. See ``is_benign_concurrent_loss`` for
 the required caller-side triage before treating a caught instance as a document failure
-under Contract #2's at-least-once-delivery assumption (REQ-003 LLD, Round 1/Round 2).
+under Contract #2's at-least-once-delivery assumption (REQ-003 LLD, Round 1/Round 2;
+Round-2-equivalent fix repeated for ``Status.NEEDS_REVIEW`` by REQ-009, since it is
+absent from ``_FORWARD_ORDER`` for the same structural reason ``Status.FAILED`` is).
 """
 
 from __future__ import annotations
@@ -38,6 +58,13 @@ class Status(str, Enum):
     Fixed, code-defined enum; sole authority for legal values and legal transitions
     (``_LEGAL_TRANSITIONS`` below). Used for both ``LedgerRow.status`` and
     ``LedgerRow.stage`` — see the LLD's Assumption A1.
+
+    ``NEEDS_REVIEW`` (REQ-009): a document parked for human review because its
+    vertical/scenario could not be confidently determined. Reachable only from
+    ``PENDING``; returns to either ``PENDING`` (a human assigned a scenario) or
+    ``FAILED`` (a human rejected it). Deliberately non-terminal — a parked document can
+    still return to the pipeline, which is the entire point of a review queue. See this
+    module's own docstring and ``docs/stories/REQ-009.md``.
     """
 
     PENDING = "pending"
@@ -47,23 +74,28 @@ class Status(str, Enum):
     INDEXING = "indexing"
     INDEXED = "indexed"
     FAILED = "failed"
+    NEEDS_REVIEW = "needs_review"
 
 
 _TERMINAL_STATUSES: frozenset[Status] = frozenset({Status.INDEXED, Status.FAILED})
 
 _LEGAL_TRANSITIONS: dict[Status, frozenset[Status]] = {
-    Status.PENDING: frozenset({Status.ANALYZING, Status.FAILED}),
+    Status.PENDING: frozenset({Status.ANALYZING, Status.FAILED, Status.NEEDS_REVIEW}),
     Status.ANALYZING: frozenset({Status.CHUNKING, Status.FAILED}),
     Status.CHUNKING: frozenset({Status.EMBEDDING, Status.FAILED}),
     Status.EMBEDDING: frozenset({Status.INDEXING, Status.FAILED}),
     Status.INDEXING: frozenset({Status.INDEXED, Status.FAILED}),
     Status.INDEXED: frozenset(),
     Status.FAILED: frozenset(),
+    Status.NEEDS_REVIEW: frozenset({Status.PENDING, Status.FAILED}),
 }
 """Authoritative legal-forward-transition table — a literal transcription of the story's
-References table. Same-status self-transitions (retry-within-stage, Assumption A2) are
-legal for every non-terminal status and are validated separately in ``validate_transition``,
-not folded into this dict."""
+References table, additively extended by REQ-009's ``NEEDS_REVIEW`` entries (``PENDING``
+gains ``NEEDS_REVIEW`` as an outgoing edge; ``NEEDS_REVIEW`` itself is only ever reachable
+from, and only ever returns to, ``PENDING``/``FAILED`` — no other status gains
+``NEEDS_REVIEW`` as a legal target). Same-status self-transitions (retry-within-stage,
+Assumption A2) are legal for every non-terminal status and are validated separately in
+``validate_transition``, not folded into this dict."""
 
 _FORWARD_ORDER: tuple[Status, ...] = (
     Status.PENDING,
@@ -73,14 +105,24 @@ _FORWARD_ORDER: tuple[Status, ...] = (
     Status.INDEXING,
     Status.INDEXED,
 )
-"""The single linear non-FAILED path through ``_LEGAL_TRANSITIONS``, precomputed for
-``is_benign_concurrent_loss``'s reachability check.
+"""The single linear non-FAILED, non-NEEDS_REVIEW path through ``_LEGAL_TRANSITIONS``,
+precomputed for ``is_benign_concurrent_loss``'s reachability check.
 
 ``Status.FAILED`` is deliberately absent: it is legal from every non-terminal status, not
 part of this single linear path, so it has no well-defined position here. Any code
 indexing into this tuple MUST special-case both ``attempted_to_status == Status.FAILED``
 and ``observed_row.status == Status.FAILED`` before calling ``.index()`` on either —
-``is_benign_concurrent_loss`` does exactly this (design-review Round 2 fix)."""
+``is_benign_concurrent_loss`` does exactly this (design-review Round 2 fix).
+
+``Status.NEEDS_REVIEW`` (REQ-009) is absent for the identical structural reason: it
+branches only off ``PENDING`` and rejoins the pipeline at ``PENDING``, so it is not a
+point *on* this linear path either. Any code indexing into this tuple MUST equally
+special-case both ``attempted_to_status == Status.NEEDS_REVIEW`` and
+``observed_row.status == Status.NEEDS_REVIEW`` before calling ``.index()`` on either —
+``is_benign_concurrent_loss`` does this too (the Round-2-equivalent fix REQ-009 required
+to keep this function's "never raises, for any input" contract true after
+``NEEDS_REVIEW`` was added; see ``docs/designs/REQ-003-lld.md``'s Revision note, third
+entry)."""
 
 
 class LedgerRow(BaseModel):
@@ -100,6 +142,23 @@ class LedgerRow(BaseModel):
         config_version: Opaque; from ``EnvelopeSummary``; set once at ``create()``.
         ingested_at: UTC; set once at ``create()``, never overwritten (AC1, AC5).
         updated_at: UTC; set on every ``create()``/``transition()`` write (AC5).
+        assigned_scenario_id: ``None`` until a human resolves a ``needs_review``-parked
+            document via ``vestibule.vertical.review_queue.ReviewQueue.assign()``
+            (REQ-009), which sets it as part of its ``needs_review -> pending``
+            transition. **Set once, never overwritten** — the same "set once" lifecycle
+            as ``config_version``/``ingested_at`` above, deliberately chosen over
+            clear-on-consumption: ``vestibule.vertical.loader.VerticalLoader.resolve()``
+            reads this field as its highest-priority resolution step, but never clears
+            it, because no entry in ``_LEGAL_TRANSITIONS`` ever returns a row to
+            ``PENDING`` once it has left ``PENDING`` via the ordinary forward path (the
+            only way back to ``PENDING`` is ``NEEDS_REVIEW -> PENDING``, i.e. another
+            ``assign()`` call, which would overwrite this field with a fresh value
+            anyway). A stale value sitting on an already-advanced row is therefore
+            provably inert, not a latent bug — see ``VerticalLoader.resolve()``'s own
+            docstring for the consuming side of this contract. Any unrelated
+            ``transition()`` call that does not pass ``assigned_scenario_id`` explicitly
+            leaves this field unchanged (never silently clears it) — see
+            ``LedgerStore.transition()``'s own docstring.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -113,6 +172,7 @@ class LedgerRow(BaseModel):
     config_version: str
     ingested_at: datetime
     updated_at: datetime
+    assigned_scenario_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -212,10 +272,29 @@ def is_benign_concurrent_loss(
       5. (Only reached for non-``FAILED`` ``attempted_to_status``.)
          ``observed_row.status == Status.FAILED`` -> ``False`` (a distinct, separately
          handled outcome — see the LLD's §3 F7 step 2).
-      6. Otherwise: ``True`` iff ``_FORWARD_ORDER.index(observed_row.status) >=
+      6. ``attempted_to_status == Status.NEEDS_REVIEW`` (REQ-009) — resolved here, for the
+         identical structural reason as step 4: ``Status.NEEDS_REVIEW`` is deliberately
+         absent from ``_FORWARD_ORDER``. ``observed_row.status != Status.PENDING`` ->
+         ``True`` (the document already left ``PENDING`` by some other means — a
+         concurrent winner parked it first, or it legitimately advanced through the
+         ordinary pipeline instead); ``observed_row.status == Status.PENDING`` -> ``False``
+         (this exact combination is never actually raised in practice, since
+         ``PENDING -> NEEDS_REVIEW`` is itself always a legal transition — but this
+         function must still return a definite, non-raising answer for every input, per
+         its own "never raises" contract).
+      7. ``observed_row.status == Status.NEEDS_REVIEW`` (only reached for
+         ``attempted_to_status`` values not already resolved by steps 4/6) -> ``False``.
+         ``NEEDS_REVIEW`` has no well-defined position relative to any status on the
+         ordinary pipeline's forward path (it is a side-branch off ``PENDING``, not a
+         point beyond it), so a race against a concurrent parking is never treated as
+         benign forward progress — the conservative default, consistent with step 8's own
+         off-path -> ``False`` precedent.
+      8. Otherwise: ``True`` iff ``_FORWARD_ORDER.index(observed_row.status) >=
          _FORWARD_ORDER.index(attempted_to_status)`` — a concurrent winner already applied
          this exact edge or has since advanced the document further along the same linear
-         path (late redelivery).
+         path (late redelivery). Both operands are now guaranteed to be in
+         ``_FORWARD_ORDER`` (steps 4-7 have already resolved every ``FAILED``/
+         ``NEEDS_REVIEW`` case on either side).
 
     Args:
         observed_row: The row observed at the moment ``LedgerTransitionInvalid`` was
@@ -237,6 +316,10 @@ def is_benign_concurrent_loss(
     if attempted_to_status == Status.FAILED:
         return observed_row.status == Status.INDEXED
     if observed_row.status == Status.FAILED:
+        return False
+    if attempted_to_status == Status.NEEDS_REVIEW:
+        return observed_row.status != Status.PENDING
+    if observed_row.status == Status.NEEDS_REVIEW:
         return False
     return _FORWARD_ORDER.index(observed_row.status) >= _FORWARD_ORDER.index(
         attempted_to_status
@@ -369,6 +452,7 @@ class LedgerStore(ABC):
         stage: Status,
         error_code: str | None = None,
         error_message: str | None = None,
+        assigned_scenario_id: str | None = None,
     ) -> LedgerRow:
         """Applies a validated state transition and returns the new row.
 
@@ -382,6 +466,16 @@ class LedgerStore(ABC):
                 rather than clearing them; passing a value overwrites both (Assumption A5).
             error_message: Optional human-readable error message to record; see
                 ``error_code`` for same-status-retry preservation behavior.
+            assigned_scenario_id: REQ-009. When non-``None``, overwrites the row's
+                ``LedgerRow.assigned_scenario_id`` with this value (the shape
+                ``vestibule.vertical.review_queue.ReviewQueue.assign()`` uses to durably
+                record a human's scenario assignment on its ``needs_review -> pending``
+                transition). When ``None`` (the default — every caller in this codebase
+                other than ``ReviewQueue.assign()`` omits this parameter entirely), the
+                row's existing ``assigned_scenario_id`` is preserved unchanged; it is
+                never implicitly cleared by an unrelated ``transition()`` call. See
+                ``LedgerRow``'s own docstring for this field's full "set once, never
+                overwritten" lifecycle.
 
         Returns:
             The new ``LedgerRow`` after the transition is applied.
@@ -473,6 +567,7 @@ class InMemoryLedgerStore(LedgerStore):
         stage: Status,
         error_code: str | None = None,
         error_message: str | None = None,
+        assigned_scenario_id: str | None = None,
     ) -> LedgerRow:
         """See ``LedgerStore.transition``."""
         validate_id_format(doc_id, field_name="doc_id")
@@ -493,6 +588,9 @@ class InMemoryLedgerStore(LedgerStore):
                 config_version=current.config_version,
                 ingested_at=current.ingested_at,
                 updated_at=datetime.now(timezone.utc),
+                assigned_scenario_id=_next_assigned_scenario_id(
+                    current, assigned_scenario_id
+                ),
             )
             self._rows[doc_id] = new_row
             return new_row
@@ -556,3 +654,23 @@ def _next_error_fields(
     if to_status == current.status and error_code is None:
         return current.last_error_code, current.last_error_message
     return error_code, error_message
+
+
+def _next_assigned_scenario_id(
+    current: LedgerRow, assigned_scenario_id: str | None
+) -> str | None:
+    """Computes the new ``assigned_scenario_id`` value, per its "set once" lifecycle.
+
+    Args:
+        current: The row before the transition is applied.
+        assigned_scenario_id: The value supplied to this ``transition()`` call, if any.
+
+    Returns:
+        ``assigned_scenario_id`` itself if the caller supplied a non-``None`` value
+        (``ReviewQueue.assign()`` durably recording a human's assignment); otherwise
+        ``current.assigned_scenario_id`` unchanged — every other caller in this codebase
+        omits this parameter and must never silently clear a prior assignment.
+    """
+    if assigned_scenario_id is not None:
+        return assigned_scenario_id
+    return current.assigned_scenario_id

@@ -12,9 +12,34 @@ Versioning: [SemVer](https://semver.org/).
   ETag) backends, plus a `CachedScenarioStore` TTL-cache decorator. Dimension-consistency
   validation (`embedder.target_dimensions`/`indexer.dimensions`) runs at scenario construction —
   fail-fast, before any document is ever ingested.
+- REQ-009: Vertical Loader — `VerticalLoader` decides which vertical/scenario an arriving
+  document belongs to (a prior human review-queue assignment, then explicit `scenario_id`/
+  `vertical`, then source-mapping glob/exact rules, first-listed-wins), refusing to guess: a
+  document with no signal is parked to `needs_review` for human review rather than classified,
+  since a misrouted document gets the wrong ACLs. `ReviewQueue` (`list_pending`/`assign`/
+  `reject`) is the minimal human-in-the-loop triage surface — `assign()` durably records the
+  human's chosen `scenario_id` on the ledger row (`LedgerRow.assigned_scenario_id`), so
+  redelivering the original, unchanged envelope after an assignment now resolves successfully
+  instead of parking again. A stated-but-missing `scenario_id`/`vertical` is a config error
+  (`SCENARIO_NOT_FOUND`), never silently downgraded to a park.
 
 ### Changed
-- _(none yet)_
+- REQ-009: extends REQ-003's ledger transition table, additively — a new non-terminal
+  `Status.NEEDS_REVIEW` value and its legal transitions (`pending -> needs_review`,
+  `needs_review -> pending`, `needs_review -> failed`); `indexed -> needs_review` remains
+  illegal (AC8). Also extends `LedgerRow` with a new `assigned_scenario_id` field (set once by
+  `ReviewQueue.assign()`, never cleared afterward — a completely inert value once a row has
+  advanced past `PENDING`) and threads a matching optional `assigned_scenario_id` keyword
+  through `LedgerStore.transition()` — every existing caller (Analyzer, Chunker, Embedder,
+  Indexer) is unaffected, since omitting the new keyword leaves the field unchanged.
+  `is_benign_concurrent_loss` gained two additional special cases (mirroring the design-review
+  Round 2 fix for `Status.FAILED`) so it continues to never raise for the new status — see
+  `docs/designs/REQ-003-lld.md`'s Revision note, third entry.
+- REQ-009: `VerticalLoader.__init__`'s `review_registry` argument is now required
+  (keyword-only, no default) instead of optional — an unshared `ReviewRegistry` between a
+  `VerticalLoader`/`ReviewQueue` pair previously degraded `ReviewQueue.list_pending()` silently
+  (blank `source`/`blob_path`/`suggested_verticals` for every parked item, nothing raised or
+  logged); making it required makes that mistake structurally impossible.
 
 ### Removed
 - _(none yet)_
