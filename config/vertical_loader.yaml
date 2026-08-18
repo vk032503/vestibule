@@ -1,0 +1,51 @@
+vertical_loader:
+  source_mappings: []            # ordered list of {match, vertical} rules — composition-root
+                                  # input, see below. Example shape:
+                                  #   source_mappings:
+                                  #     - match: "blob:hr-*"        # glob against envelope.source
+                                  #       vertical: "hr"
+                                  #     - match: "sharepoint:legal-site"
+                                  #       vertical: "legal"
+
+  park_unresolved: true          # when false, an unresolved document raises VERTICAL_UNRESOLVED
+                                  # without any needs_review ledger transition at all —
+                                  # code-authoritative, see below
+
+  review_queue:
+    suggest_verticals: true      # whether VerticalLoader populates ReviewItem.suggested_verticals
+                                  # when parking a document — code-authoritative, see below
+
+  error_codes:
+    VERTICAL_UNRESOLVED: PERMANENT
+    VERTICAL_MAPPING_INVALID: PERMANENT
+    VERTICAL_REJECTED: PERMANENT
+    REVIEW_ITEM_NOT_FOUND: PERMANENT
+    # SCENARIO_NOT_FOUND (PERMANENT) is also raised by this component (a
+    # stated-but-missing scenario_id/vertical) but is not re-declared here — it is
+    # owned and registered by config/scenario_store.yaml / vestibule.scenario.model
+    # (REQ-010); reused as-is, not redefined (see src/vestibule/vertical/loader.py's
+    # module docstring for why ScenarioStore.resolve() itself is deliberately not
+    # reused for this).
+
+# NOTE: three different kinds of key live in this file, following config/scenario_store.yaml's
+# established precedent exactly:
+#
+# - source_mappings is composition-root input, not a VerticalLoaderConfig field with a fixed
+#   runtime-loaded value: no config-loading mechanism exists anywhere in this codebase yet, so a
+#   direct caller constructs VerticalLoaderConfig(source_mappings=(...)) itself. The empty-list
+#   default shown here matches VerticalLoaderConfig.source_mappings' own literal default (an
+#   empty tuple) — kept in sync by a dedicated test
+#   (test_config_vertical_loader_yaml_matches_code_defaults).
+#
+# - park_unresolved / review_queue.suggest_verticals are ordinary operational tunables (no
+#   bearing on Contract #2/#3 correctness beyond what VerticalLoader.__init__'s own
+#   VERTICAL_MAPPING_INVALID fail-fast check already enforces) — code-authoritative, matching
+#   config/scenario_store.yaml's cache.ttl_seconds precedent: the literal Python defaults on
+#   VerticalLoaderConfig itself (park_unresolved=True, suggest_verticals=True) are the
+#   always-effective source of truth, kept in sync with this file by the same dedicated test
+#   above.
+#
+# - error_codes follows the same documentation/audit-only convention as config/errors.yaml's
+#   known_codes and config/scenario_store.yaml's own error_codes block: not read at runtime; the
+#   registry populated via register_error at import time (src/vestibule/vertical/model.py) is
+#   authoritative.

@@ -16,6 +16,7 @@ from vestibule.identity.derive import IdentityInvalid, derive_doc_id
 from vestibule.ledger.store import (
     _FORWARD_ORDER,
     _LEGAL_TRANSITIONS,
+    _TERMINAL_STATUSES,
     EnvelopeSummary,
     InMemoryLedgerStore,
     LedgerRow,
@@ -32,6 +33,7 @@ _NON_TERMINAL: tuple[Status, ...] = (
     Status.CHUNKING,
     Status.EMBEDDING,
     Status.INDEXING,
+    Status.NEEDS_REVIEW,
 )
 _TERMINAL: tuple[Status, ...] = (Status.INDEXED, Status.FAILED)
 _ALL_STATUSES: tuple[Status, ...] = tuple(Status)
@@ -51,6 +53,10 @@ def _build_row_at(store: InMemoryLedgerStore, doc_id: str, target: Status) -> Le
         return row
     if target == Status.FAILED:
         return store.transition(doc_id, Status.FAILED, Status.FAILED, error_code="E")
+    if target == Status.NEEDS_REVIEW:
+        # NEEDS_REVIEW (REQ-009) branches off PENDING directly; it has no position on
+        # _FORWARD_ORDER's linear path, so it cannot be reached by the loop below.
+        return store.transition(doc_id, Status.NEEDS_REVIEW, Status.NEEDS_REVIEW)
     for status in _FORWARD_ORDER[1:]:
         row = store.transition(doc_id, status, status)
         if status == target:
@@ -161,6 +167,35 @@ def test_transition_from_terminal_indexed_rejected() -> None:
     _build_row_at(store, doc_id, Status.INDEXED)
     with pytest.raises(LedgerTransitionInvalid):
         store.transition(doc_id, Status.FAILED, Status.FAILED, error_code="E")
+
+
+# --- REQ-009: NEEDS_REVIEW transition-table extension (AC8) ----------------------------
+
+
+def test_transition_from_indexed_to_needs_review_rejected() -> None:
+    """AC8: `indexed -> needs_review` must be illegal — INDEXED stays terminal even
+    though NEEDS_REVIEW itself is deliberately non-terminal."""
+    store = InMemoryLedgerStore()
+    doc_id = _new_doc_id("indexed-to-needs-review")
+    _build_row_at(store, doc_id, Status.INDEXED)
+    with pytest.raises(LedgerTransitionInvalid) as exc_info:
+        store.transition(doc_id, Status.NEEDS_REVIEW, Status.NEEDS_REVIEW)
+    assert exc_info.value.classification == "PERMANENT"
+
+
+def test_needs_review_is_not_terminal() -> None:
+    assert Status.NEEDS_REVIEW not in _TERMINAL_STATUSES
+
+
+def test_needs_review_only_reachable_as_outgoing_edge_from_pending() -> None:
+    """Only PENDING gains NEEDS_REVIEW as a legal target — no other status (in
+    particular not INDEXING or any other mid-pipeline stage) does."""
+    sources_targeting_needs_review = [
+        frm
+        for frm, targets in _LEGAL_TRANSITIONS.items()
+        if Status.NEEDS_REVIEW in targets
+    ]
+    assert sources_targeting_needs_review == [Status.PENDING]
 
 
 def test_transition_from_terminal_failed_rejected() -> None:
@@ -583,6 +618,72 @@ def test_is_benign_concurrent_loss_false_when_attempted_failed_and_observed_fail
 ):
     observed = _row(Status.FAILED)
     result = is_benign_concurrent_loss(observed, Status.FAILED, Status.FAILED)
+    assert result is False
+
+
+# --- REQ-009: is_benign_concurrent_loss NEEDS_REVIEW special cases (Round 3) ------------
+
+
+@pytest.mark.parametrize(
+    "observed_status",
+    [
+        Status.ANALYZING,
+        Status.CHUNKING,
+        Status.EMBEDDING,
+        Status.INDEXING,
+        Status.INDEXED,
+        Status.NEEDS_REVIEW,
+    ],
+)
+def test_is_benign_concurrent_loss_true_when_attempted_needs_review_and_observed_left_pending(
+    observed_status: Status,
+) -> None:
+    observed = _row(observed_status)
+    result = is_benign_concurrent_loss(
+        observed, Status.NEEDS_REVIEW, Status.NEEDS_REVIEW
+    )
+    assert result is True
+
+
+def test_is_benign_concurrent_loss_false_when_attempted_needs_review_and_observed_pending() -> (
+    None
+):
+    observed = _row(Status.PENDING)
+    result = is_benign_concurrent_loss(
+        observed, Status.NEEDS_REVIEW, Status.NEEDS_REVIEW
+    )
+    assert result is False
+
+
+def test_is_benign_concurrent_loss_false_when_attempted_needs_review_and_observed_failed() -> (
+    None
+):
+    observed = _row(Status.FAILED)
+    result = is_benign_concurrent_loss(
+        observed, Status.NEEDS_REVIEW, Status.NEEDS_REVIEW
+    )
+    assert result is False
+
+
+@pytest.mark.parametrize(
+    "attempted_to_status",
+    [
+        Status.PENDING,
+        Status.ANALYZING,
+        Status.CHUNKING,
+        Status.EMBEDDING,
+        Status.INDEXING,
+    ],
+)
+def test_is_benign_concurrent_loss_false_when_observed_needs_review_and_attempted_other(
+    attempted_to_status: Status,
+) -> None:
+    """NEEDS_REVIEW has no well-defined position relative to the ordinary pipeline's
+    forward path, so a race against a concurrent parking is never treated as benign."""
+    observed = _row(Status.NEEDS_REVIEW)
+    result = is_benign_concurrent_loss(
+        observed, attempted_to_status, attempted_to_status
+    )
     assert result is False
 
 

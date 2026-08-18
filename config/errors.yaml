@@ -42,6 +42,10 @@ errors:
     SCENARIO_CONFLICT: TRANSIENT
     SCENARIO_STORE_UNAVAILABLE: TRANSIENT
     SCENARIO_STORE_DEPENDENCY_MISSING: PERMANENT
+    VERTICAL_UNRESOLVED: PERMANENT
+    VERTICAL_MAPPING_INVALID: PERMANENT
+    VERTICAL_REJECTED: PERMANENT
+    REVIEW_ITEM_NOT_FOUND: PERMANENT
 
 # NOTE: unknown_code_default_severity and known_codes are listed here for
 # documentation/audit visibility only, following the exact precedent set by

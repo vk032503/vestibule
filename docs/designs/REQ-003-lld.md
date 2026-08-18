@@ -6,6 +6,9 @@
 Revised twice after design-review REJECTs, both rounds confined to the concurrency/PERMANENT
 semantics fix for `LedgerTransitionInvalid` — **no `LedgerStore` method signature has changed in
 either round** (`create`/`transition`/`get`/`list_by_status` remain exactly as given by the story).
+A third, post-merge revision (below) additively extends this LLD's own transition table under a
+later REQ; it is a live-reference pointer, not a re-opening of the frozen historical record §1-§8
+below.
 
 **Round 1** — three findings:
 1. **[MAJOR]** A losing caller in a concurrent `transition()` race (§3 F7) raised
@@ -21,7 +24,7 @@ either round** (`create`/`transition`/`get`/`list_by_status` remain exactly as g
 3. **[MINOR]** Added an explicit one-line acknowledgment (§4, §8) that `attempts` has no
    ledger-enforced retry cap. Confirmed resolved on re-review; unchanged in Round 2.
 
-**Round 2 (this revision)** — one narrow gap inside Round 1's fix for finding #1:
+**Round 2** — one narrow gap inside Round 1's fix for finding #1:
 `is_benign_concurrent_loss`'s reachability check indexed `attempted_to_status` into
 `_FORWARD_ORDER`, but `_FORWARD_ORDER` deliberately excludes `Status.FAILED` — and
 `attempted_to_status` can legitimately *be* `Status.FAILED` (a losing caller racing to mark a
@@ -35,6 +38,28 @@ order-dependent special case for `attempted_to_status == Status.FAILED` that nev
 `_FORWARD_ORDER` lookup for that value (§1), updating §3 F7's caller-guidance steps to match, and
 adding regression tests, including one that exhaustively exercises every `(attempted_to_status,
 observed_row.status)` pair to assert the helper never raises (§7).
+
+**Round 3 (this revision, REQ-009)** — a post-merge, additive extension of this LLD's own
+transition table, not a design-review REJECT: REQ-009 (Vertical Loader) needed a way to park a
+document for human review when its vertical/scenario cannot be confidently determined, without
+guessing at ACL-relevant routing. This added a new `Status.NEEDS_REVIEW` value and three new
+`_LEGAL_TRANSITIONS` edges (`pending -> needs_review`, `needs_review -> pending`,
+`needs_review -> failed`) directly in `src/vestibule/ledger/store.py` — deliberately in-place,
+not a new module, since Contract #3's ledger has exactly one FSM. `NEEDS_REVIEW` is *not* added to
+`_TERMINAL_STATUSES`; that is the point of a review queue that can return documents to the
+pipeline. This re-opened the exact class of gap Round 2 fixed: `Status.NEEDS_REVIEW`, like
+`Status.FAILED`, is absent from `_FORWARD_ORDER` (it branches only off `PENDING`, so it has no
+well-defined position on the single linear pipeline path either), and — as confirmed by this
+repo's own pre-existing `test_is_benign_concurrent_loss_never_raises` hypothesis test, which
+samples every `Status` member automatically via `tuple(Status)` — adding `NEEDS_REVIEW` to the
+enum without also updating `is_benign_concurrent_loss` would have reintroduced the identical
+`tuple.index() -> ValueError` crash Round 2 fixed, this time on both `attempted_to_status ==
+Status.NEEDS_REVIEW` and `observed_row.status == Status.NEEDS_REVIEW`. Fixed with the same
+technique as Round 2: two more order-dependent special cases in `is_benign_concurrent_loss`,
+resolved before either side ever reaches `_FORWARD_ORDER.index()`. See `docs/stories/REQ-009.md`
+for the full vertical-routing rationale (why ambiguity parks but a stated-but-missing
+vertical/scenario is a config error instead, and why `VERTICAL_UNRESOLVED` is classified PERMANENT
+even though the parked document is not dead) — that rationale is REQ-009's own, not restated here.
 
 ## Assumptions (non-blocking, flagged per house rules)
 The story specifies the four `LedgerStore` methods, the `Status` values, and the legal-transition
