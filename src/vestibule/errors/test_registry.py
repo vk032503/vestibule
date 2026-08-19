@@ -419,6 +419,7 @@ def test_config_known_codes_matches_all_codes_after_importing_all_modules() -> N
     import vestibule.identity.derive  # noqa: F401
     import vestibule.indexer.model  # noqa: F401
     import vestibule.ledger.store  # noqa: F401
+    import vestibule.provisioning.model  # noqa: F401
     import vestibule.scenario.model  # noqa: F401
     import vestibule.vertical.model  # noqa: F401
 

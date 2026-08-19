@@ -30,6 +30,8 @@ from __future__ import annotations
 import hashlib
 import io
 import re
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Iterable
 
 from vestibule.analyzer.analyzer import Analyzer, AnalyzerConfig
@@ -44,6 +46,20 @@ from vestibule.envelope.model import TrustTier, build_envelope
 from vestibule.indexer.adapters.in_memory import InMemoryIndexer
 from vestibule.indexer.indexer import Indexer, IndexerConfig
 from vestibule.ledger.store import EnvelopeSummary, InMemoryLedgerStore, Status
+from vestibule.provisioning.adapters.in_memory import InMemoryProvisioner
+from vestibule.provisioning.provisioner import IndexProvisioner, ProvisioningConfig
+from vestibule.provisioning.registry import InMemoryIndexRegistry
+from vestibule.provisioning.templates import IndexTemplateStore
+from vestibule.scenario.model import (
+    ChunkerSettings,
+    EmbedderSettings,
+    IndexerSettings,
+    Scenario,
+)
+
+_SHIPPED_TEMPLATE_DIR = (
+    Path(__file__).resolve().parents[3] / "config" / "index_templates"
+)
 
 _EMBEDDING_DIMENSIONS = 64
 _DISTINCTIVE_PHRASE = "the wombat regulatory commission requires form 27B quarterly"
@@ -174,3 +190,112 @@ def test_e2e_pdf_flows_through_full_pipeline_and_is_retrievable_via_search() -> 
     assert matches, f"expected a wombat chunk in the top 3 results, got {top_results!r}"
     assert matches[0].allowed_groups == ["compliance-team"]
     assert matches[0].trust_tier == "internal"
+
+
+def test_e2e_new_vertical_provisions_indexes_and_retrieves_locally() -> None:
+    """REQ-011, AC10 — extends the quickstart flow above: a brand-new vertical (no
+    pre-existing `IndexRegistry` entry) is provisioned via `IndexProvisioner.ensure()`
+    ahead of indexing, then a document is chunked/embedded/indexed into the
+    newly-provisioned `InMemoryIndexer`, and `search()` retrieves it — zero cloud
+    credentials, proving "provision, then write" works end to end locally.
+    """
+    pdf_bytes = _fixture_pdf_bytes()
+    content_hash = hashlib.sha256(pdf_bytes).hexdigest()
+    envelope = build_envelope(
+        source="e2e-provisioning-test",
+        blob_path="fixtures/new-vertical-filing.pdf",
+        content_hash=content_hash,
+        trust_tier=TrustTier.INTERNAL,
+        allowed_groups=["new-vertical-team"],
+    )
+
+    ledger = InMemoryLedgerStore()
+    ledger.create(
+        envelope.doc_id, EnvelopeSummary(config_version="e2e-provisioning-v1")
+    )
+
+    registry = ParserRegistry()
+    registry.register(DetectedType.DIGITAL_PDF, PyMuPDFParser())
+    analyzer = Analyzer(ledger, registry, AnalyzerConfig())
+    elements = analyzer.analyze(envelope, io.BytesIO(pdf_bytes))
+    assert elements
+
+    chunker = Chunker(ledger, ChunkerConfig(), TiktokenCounter())
+    chunks = chunker.chunk(envelope, elements)
+    assert chunks
+
+    fastembed_adapter = FastEmbedEmbedder(
+        _text_embedding=_HashingTextEmbedding(_EMBEDDING_DIMENSIONS)
+    )
+    embedder = Embedder(
+        ledger, EmbedderConfig(target_dimensions=None), fastembed_adapter
+    )
+    embedded_chunks = embedder.embed(envelope, chunks)
+    assert embedded_chunks
+
+    # --- REQ-011: provision the brand-new vertical's index before any write --------
+    now = datetime.now(timezone.utc)
+    scenario = Scenario(
+        scenario_id="new-vertical-v1",
+        vertical="new-vertical",
+        config_version="1",
+        index_name="vestibule-new-vertical-v1",
+        chunker=ChunkerSettings(
+            target_chunk_tokens=512,
+            overlap_tokens=64,
+            min_chunk_tokens=40,
+            max_chunk_tokens=800,
+        ),
+        embedder=EmbedderSettings(
+            adapter="fastembed",
+            model="nomic-ai/nomic-embed-text-v1.5",
+            target_dimensions=_EMBEDDING_DIMENSIONS,
+        ),
+        indexer=IndexerSettings(
+            metric="cosine",
+            dimensions=_EMBEDDING_DIMENSIONS,
+            hnsw_m=4,
+            hnsw_ef_construction=400,
+            hnsw_ef_search=500,
+        ),
+        acl_source="envelope",
+        default_trust_tier="internal",
+        enabled=True,
+        created_at=now,
+        updated_at=now,
+    )
+    in_memory_indexer = InMemoryIndexer(index_name=scenario.index_name)
+    index_registry = InMemoryIndexRegistry()
+    provisioner = IndexProvisioner(
+        index_registry,
+        InMemoryProvisioner(in_memory_indexer),
+        IndexTemplateStore(_SHIPPED_TEMPLATE_DIR),
+        ProvisioningConfig(),
+    )
+
+    assert index_registry.get(scenario.index_name) is None  # brand-new vertical
+    provisioned = provisioner.ensure(scenario)
+    assert provisioned.status == "ready"
+    assert provisioned.dimensions == _EMBEDDING_DIMENSIONS
+
+    # --- provision-then-write: the same InMemoryIndexer instance now writes -----------
+    indexer = Indexer(
+        ledger,
+        IndexerConfig(dimensions=_EMBEDDING_DIMENSIONS, metric="cosine"),
+        in_memory_indexer,
+    )
+    result = indexer.index(envelope, embedded_chunks)
+    assert result.chunks_upserted == len(embedded_chunks)
+
+    row = ledger.get(envelope.doc_id)
+    assert row is not None
+    assert row.status == Status.INDEXED
+
+    query_vector = _hash_embed(_DISTINCTIVE_PHRASE, _EMBEDDING_DIMENSIONS)
+    top_results = in_memory_indexer.search(query_vector, top_k=3)
+    matches = [
+        record
+        for record, _score in top_results
+        if record.doc_id == envelope.doc_id and "wombat" in record.text.lower()
+    ]
+    assert matches, f"expected a wombat chunk in the top 3 results, got {top_results!r}"

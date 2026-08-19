@@ -197,6 +197,28 @@ def test_search_zero_vector_query_returns_zero_similarity_not_an_error() -> None
     assert results[0][1] == 0.0
 
 
+# --- schema property (REQ-011 Assumption A15) -----------------------------------------------------
+
+
+def test_schema_property_is_none_before_ensure_schema_called() -> None:
+    adapter = InMemoryIndexer()
+    assert adapter.schema is None
+
+
+def test_schema_property_reflects_private_schema_attribute_after_ensure_schema() -> (
+    None
+):
+    adapter = InMemoryIndexer()
+    adapter.ensure_schema(4, "cosine")
+    assert adapter.schema == (4, "cosine")
+
+
+def test_schema_property_has_no_setter() -> None:
+    adapter = InMemoryIndexer()
+    with pytest.raises(AttributeError):
+        adapter.schema = (4, "cosine")  # type: ignore[misc]
+
+
 # --- thread safety ---------------------------------------------------------------------------------
 
 

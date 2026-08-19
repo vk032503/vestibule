@@ -334,6 +334,71 @@ def test_get_timeout_exhausted_raises_scenario_store_unavailable() -> None:
     assert exc_info.value.error_code == SCENARIO_STORE_UNAVAILABLE
 
 
+# --- index_template_id round trip (REQ-011 Assumption A1) ------------------------------------
+
+
+def test_table_storage_round_trip_preserves_index_template_id() -> None:
+    store = _make_store(_FakeTableBackend())
+    written = store.upsert(
+        _scenario("hr-1", "hr").model_copy(update={"index_template_id": "standard-v1"})
+    )
+    assert written.index_template_id == "standard-v1"
+
+    fetched = store.get("hr-1")
+    assert fetched is not None
+    assert fetched.index_template_id == "standard-v1"
+
+
+def test_table_storage_round_trip_defaults_index_template_id_to_none_when_absent() -> (
+    None
+):
+    backend = _FakeTableBackend()
+    # Simulates a pre-REQ-011 entity written before index_template_id existed: no
+    # such property at all in the stored data.
+    backend.seed(
+        _TableEntityRecord(
+            partition_key="hr",
+            row_key="hr-1",
+            data={
+                "scenario_id": "hr-1",
+                "vertical": "hr",
+                "config_version": "1",
+                "index_name": "hr-1-idx",
+                "acl_source": "envelope",
+                "default_trust_tier": "internal",
+                "enabled": True,
+                "created_at": _FIXED_TIME.isoformat(),
+                "updated_at": _FIXED_TIME.isoformat(),
+                "chunker_json": ChunkerSettings(
+                    target_chunk_tokens=512,
+                    overlap_tokens=64,
+                    min_chunk_tokens=40,
+                    max_chunk_tokens=800,
+                ).model_dump_json(),
+                "embedder_json": EmbedderSettings(
+                    adapter="azure_openai",
+                    model="text-embedding-3-large",
+                    target_dimensions=1024,
+                ).model_dump_json(),
+                "indexer_json": IndexerSettings(
+                    metric="cosine",
+                    dimensions=1024,
+                    hnsw_m=4,
+                    hnsw_ef_construction=400,
+                    hnsw_ef_search=500,
+                ).model_dump_json(),
+            },
+            etag="1",
+        )
+    )
+    store = _make_store(backend)
+
+    fetched = store.get("hr-1")
+
+    assert fetched is not None
+    assert fetched.index_template_id is None
+
+
 # --- corrupt stored entity -------------------------------------------------------------------
 
 

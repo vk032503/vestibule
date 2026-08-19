@@ -71,6 +71,8 @@ ignore_missing_imports = true
 module = [
     "vestibule.indexer.adapters.azure_ai_search",
     "vestibule.indexer.adapters._azure_search_backend",
+    "vestibule.provisioning.adapters.azure_ai_search",
+    "vestibule.provisioning.adapters._azure_search_backend",
 ]
 ignore_missing_imports = true
 disable_error_code = ["import-untyped"]
@@ -81,6 +83,9 @@ disable_error_code = ["import-untyped"]
 # environment. Scoped to exactly the one module that lazily imports it (only inside
 # `_load_real_backend`/`_RealTableBackend`'s own methods, never at module import time),
 # so strict-mode checking is unchanged everywhere else in this codebase.
-module = ["vestibule.scenario.stores._azure_table_backend"]
+module = [
+    "vestibule.scenario.stores._azure_table_backend",
+    "vestibule.provisioning.stores._azure_table_backend",
+]
 ignore_missing_imports = true
 disable_error_code = ["import-untyped"]
