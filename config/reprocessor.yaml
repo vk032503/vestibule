@@ -1,0 +1,28 @@
+reprocessor:
+  default_list_limit: 100        # operational tunable — kept in sync with the code default, see below
+  max_batch_requeue: 500         # hard cap on requeue_by_error_code() per call — code-authoritative, see below
+
+  error_codes:
+    REPROCESS_NOT_FAILED: PERMANENT
+    REPROCESS_DOC_NOT_FOUND: PERMANENT
+
+# NOTE: two different kinds of key live in this file, following config/vertical_loader.yaml's
+# established precedent exactly:
+#
+# - default_list_limit / max_batch_requeue are ordinary operational tunables with no
+#   idempotency or safety implication — a pagination page size and a bulk-requeue cap have no
+#   bearing on Contract #2/#3 correctness — so they are code-authoritative, matching
+#   config/ledger.yaml's own default_list_limit precedent: the literal Python defaults on
+#   `vestibule.reprocessor.reprocessor` (`_DEFAULT_LIST_LIMIT = 100`,
+#   `ReprocessorConfig.max_batch_requeue = 500`) are the always-effective source of truth, kept
+#   in sync with this file by a dedicated test (test_config_reprocessor_yaml_matches_code_defaults).
+#   No config-loading mechanism exists anywhere in this codebase yet (see
+#   config/vertical_loader.yaml, config/scenario_store.yaml — equally documentation-only today);
+#   a direct caller constructs `ReprocessorConfig(max_batch_requeue=...)` itself.
+#
+# - error_codes follows the same documentation/audit-only convention as config/errors.yaml's
+#   known_codes and config/vertical_loader.yaml's own error_codes block: not read at runtime; the
+#   registry populated via register_error at import time (src/vestibule/reprocessor/model.py) is
+#   authoritative.
+#
+# No secrets live in this file.

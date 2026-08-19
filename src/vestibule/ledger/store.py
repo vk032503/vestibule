@@ -35,6 +35,55 @@ the required caller-side triage before treating a caught instance as a document 
 under Contract #2's at-least-once-delivery assumption (REQ-003 LLD, Round 1/Round 2;
 Round-2-equivalent fix repeated for ``Status.NEEDS_REVIEW`` by REQ-009, since it is
 absent from ``_FORWARD_ORDER`` for the same structural reason ``Status.FAILED`` is).
+
+Round 4 (REQ-012, Poison Queue Reprocessor): additively extends this FSM a second time,
+the same way REQ-009 did, with ``Status.ARCHIVED`` and two new outgoing edges from
+``Status.FAILED``: ``failed -> pending`` (requeue) and ``failed -> archived`` (archive).
+Before this change, ``Status.FAILED`` was in every practical sense fully terminal:
+``_TERMINAL_STATUSES`` already included it (alongside ``Status.INDEXED``), and
+``_LEGAL_TRANSITIONS[Status.FAILED]`` was ``frozenset()`` — no edge out of ``failed`` was
+legal, full stop. That is genuinely different from ``Status.NEEDS_REVIEW``'s situation:
+``NEEDS_REVIEW`` was never terminal (deliberately excluded from ``_TERMINAL_STATUSES``
+from the start) — REQ-009 gave it its two return edges without touching terminality at
+all. REQ-012 instead re-opens a status that *was* fully terminal, which
+``validate_transition``'s original "``current.status in _TERMINAL_STATUSES`` -> always
+reject" check could not accommodate as written: that check ran unconditionally, before
+the legal-transitions-table lookup, so simply adding ``Status.FAILED: frozenset({PENDING,
+ARCHIVED})`` to ``_LEGAL_TRANSITIONS`` would have had no effect — the terminal check would
+still reject both edges before the table was ever consulted. ``validate_transition`` is
+therefore changed (this revision) to reject a terminal-status transition only when
+``to_status`` is not itself one of that status's own explicitly-legal targets — so
+``Status.INDEXED``/``Status.ARCHIVED`` (both still mapped to ``frozenset()``) remain fully
+blocked exactly as before, while ``Status.FAILED`` now permits precisely its two new
+named edges and nothing else (in particular, ``failed -> failed`` self-retry is still
+rejected — ``Status.FAILED`` is deliberately absent from its own legal-target set, unlike
+non-terminal statuses' generic same-status-retry allowance).
+
+Crucially, **the exit from ``failed`` is real at the table level but is a human-triggered
+exception path, not a pipeline one**: ``validate_transition``/``LedgerStore.transition()``
+have no notion of caller identity, so they cannot themselves distinguish "an operator
+called this via ``vestibule.reprocessor.reprocessor.Reprocessor.requeue()``/``archive()``"
+from "pipeline code called this" — both would be equally legal at this layer. The
+boundary is enforced entirely by convention: only ``Reprocessor.requeue()``/``archive()``
+are permitted, anywhere in this codebase, to call ``ledger.transition(...,
+to_status=Status.PENDING)``/``to_status=Status.ARCHIVED`` on a row that is currently
+``failed``. No pipeline component (``Analyzer``, ``Chunker``, ``Embedder``, ``Indexer``,
+``VerticalLoader``) does this today, and none may be changed to. See
+``src/vestibule/ledger/test_store.py``'s dedicated regression guard for what can and
+cannot actually be mechanically tested about this boundary, and
+``vestibule.reprocessor.reprocessor`` for the only legitimate callers.
+
+``Status.ARCHIVED`` itself is a genuinely new terminal status (added to
+``_TERMINAL_STATUSES``, mapped to ``frozenset()`` in ``_LEGAL_TRANSITIONS`` exactly like
+``Status.INDEXED``) — reachable only from ``failed``, and permitting no further
+transitions at all, including no self-retry. ``is_benign_concurrent_loss`` gains a
+matching Round-4 special case for ``Status.ARCHIVED``, for the identical structural
+reason ``Status.FAILED``/``Status.NEEDS_REVIEW`` already have one: ``Status.ARCHIVED`` is
+absent from ``_FORWARD_ORDER`` (it has no position on the ordinary pipeline's linear
+path), so it must be resolved before any ``_FORWARD_ORDER.index()`` call touches it — see
+that function's own docstring for the exact new steps. See
+``docs/designs/REQ-003-lld.md``'s ``## Revision note`` (fourth entry) and
+``docs/stories/REQ-012.md`` for the full rationale.
 """
 
 from __future__ import annotations
@@ -65,6 +114,13 @@ class Status(str, Enum):
     ``FAILED`` (a human rejected it). Deliberately non-terminal — a parked document can
     still return to the pipeline, which is the entire point of a review queue. See this
     module's own docstring and ``docs/stories/REQ-009.md``.
+
+    ``ARCHIVED`` (REQ-012): terminal. Reachable only from ``FAILED``, via a human's
+    explicit ``vestibule.reprocessor.reprocessor.Reprocessor.archive()`` call — for a
+    failed document that will never succeed and should stop appearing in
+    ``Reprocessor.list_failed()``. No transition out of ``ARCHIVED`` is ever legal
+    (``_LEGAL_TRANSITIONS[Status.ARCHIVED] == frozenset()``, same as ``INDEXED``). See
+    this module's own docstring's "Round 4" entry and ``docs/stories/REQ-012.md``.
     """
 
     PENDING = "pending"
@@ -75,9 +131,18 @@ class Status(str, Enum):
     INDEXED = "indexed"
     FAILED = "failed"
     NEEDS_REVIEW = "needs_review"
+    ARCHIVED = "archived"
 
 
-_TERMINAL_STATUSES: frozenset[Status] = frozenset({Status.INDEXED, Status.FAILED})
+_TERMINAL_STATUSES: frozenset[Status] = frozenset(
+    {Status.INDEXED, Status.FAILED, Status.ARCHIVED}
+)
+"""``Status.FAILED`` remains here after REQ-012 — it is still rejected for self-retry and
+every mid-pipeline target; it merely gains two explicitly-named legal exits, checked
+against ``_LEGAL_TRANSITIONS`` before this set is consulted (see
+``validate_transition``). ``Status.ARCHIVED`` (REQ-012) joins as a second, ordinary fully-
+closed terminal status, exactly like ``Status.INDEXED`` — no exceptions carved out for it
+at all."""
 
 _LEGAL_TRANSITIONS: dict[Status, frozenset[Status]] = {
     Status.PENDING: frozenset({Status.ANALYZING, Status.FAILED, Status.NEEDS_REVIEW}),
@@ -86,16 +151,22 @@ _LEGAL_TRANSITIONS: dict[Status, frozenset[Status]] = {
     Status.EMBEDDING: frozenset({Status.INDEXING, Status.FAILED}),
     Status.INDEXING: frozenset({Status.INDEXED, Status.FAILED}),
     Status.INDEXED: frozenset(),
-    Status.FAILED: frozenset(),
+    Status.FAILED: frozenset({Status.PENDING, Status.ARCHIVED}),
     Status.NEEDS_REVIEW: frozenset({Status.PENDING, Status.FAILED}),
+    Status.ARCHIVED: frozenset(),
 }
 """Authoritative legal-forward-transition table — a literal transcription of the story's
 References table, additively extended by REQ-009's ``NEEDS_REVIEW`` entries (``PENDING``
 gains ``NEEDS_REVIEW`` as an outgoing edge; ``NEEDS_REVIEW`` itself is only ever reachable
 from, and only ever returns to, ``PENDING``/``FAILED`` — no other status gains
-``NEEDS_REVIEW`` as a legal target). Same-status self-transitions (retry-within-stage,
-Assumption A2) are legal for every non-terminal status and are validated separately in
-``validate_transition``, not folded into this dict."""
+``NEEDS_REVIEW`` as a legal target) and by REQ-012's two ``Status.FAILED`` exits
+(``PENDING`` — requeue; ``ARCHIVED`` — archive) plus ``Status.ARCHIVED``'s own empty
+entry (fully terminal, same shape as ``Status.INDEXED``). Same-status self-transitions
+(retry-within-stage, Assumption A2) are legal for every non-terminal status and are
+validated separately in ``validate_transition``, not folded into this dict —
+``Status.FAILED`` is deliberately excluded from that generic allowance despite no longer
+being fully closed: only its two explicitly-named targets above are legal, never
+``Status.FAILED`` itself (see ``validate_transition``'s Round-4 revision note)."""
 
 _FORWARD_ORDER: tuple[Status, ...] = (
     Status.PENDING,
@@ -122,7 +193,18 @@ special-case both ``attempted_to_status == Status.NEEDS_REVIEW`` and
 ``is_benign_concurrent_loss`` does this too (the Round-2-equivalent fix REQ-009 required
 to keep this function's "never raises, for any input" contract true after
 ``NEEDS_REVIEW`` was added; see ``docs/designs/REQ-003-lld.md``'s Revision note, third
-entry)."""
+entry).
+
+``Status.ARCHIVED`` (REQ-012) is absent for a related but distinct reason: unlike
+``NEEDS_REVIEW`` (a side-branch that rejoins the pipeline) it is a genuine dead end
+reachable only from ``Status.FAILED`` — but ``Status.FAILED`` itself has never had a
+position on this tuple either (see the first paragraph above), so ``ARCHIVED``, one hop
+further from an already-absent status, cannot have one. Any code indexing into this tuple
+MUST equally special-case both ``attempted_to_status == Status.ARCHIVED`` and
+``observed_row.status == Status.ARCHIVED`` before calling ``.index()`` on either —
+``is_benign_concurrent_loss`` does this too (the Round-4-equivalent fix; see this
+module's own docstring, "Round 4" entry, and ``docs/designs/REQ-003-lld.md``'s Revision
+note, fourth entry)."""
 
 
 class LedgerRow(BaseModel):
@@ -289,12 +371,23 @@ def is_benign_concurrent_loss(
          point beyond it), so a race against a concurrent parking is never treated as
          benign forward progress — the conservative default, consistent with step 8's own
          off-path -> ``False`` precedent.
-      8. Otherwise: ``True`` iff ``_FORWARD_ORDER.index(observed_row.status) >=
+      8. ``attempted_to_status == Status.ARCHIVED`` (REQ-012) — resolved here, for the
+         identical structural reason as steps 4/6: ``Status.ARCHIVED`` is deliberately
+         absent from ``_FORWARD_ORDER``. ``observed_row.status == Status.ARCHIVED`` ->
+         ``True`` (a concurrent winner already archived it — the exact same edge);
+         any other observed status -> ``False`` (conservative: unlike ``FAILED -> ...``'s
+         "already reached a later terminal state" case, no other status is treated as
+         "further along" than ``archived``, since ``archived`` has no linear relationship
+         to anything but ``failed``).
+      9. ``observed_row.status == Status.ARCHIVED`` (only reached for
+         ``attempted_to_status`` values not already resolved by steps 4/6/8) -> ``False``,
+         for the identical conservative reason as step 7.
+      10. Otherwise: ``True`` iff ``_FORWARD_ORDER.index(observed_row.status) >=
          _FORWARD_ORDER.index(attempted_to_status)`` — a concurrent winner already applied
          this exact edge or has since advanced the document further along the same linear
          path (late redelivery). Both operands are now guaranteed to be in
-         ``_FORWARD_ORDER`` (steps 4-7 have already resolved every ``FAILED``/
-         ``NEEDS_REVIEW`` case on either side).
+         ``_FORWARD_ORDER`` (steps 4-9 have already resolved every ``FAILED``/
+         ``NEEDS_REVIEW``/``ARCHIVED`` case on either side).
 
     Args:
         observed_row: The row observed at the moment ``LedgerTransitionInvalid`` was
@@ -320,6 +413,10 @@ def is_benign_concurrent_loss(
     if attempted_to_status == Status.NEEDS_REVIEW:
         return observed_row.status != Status.PENDING
     if observed_row.status == Status.NEEDS_REVIEW:
+        return False
+    if attempted_to_status == Status.ARCHIVED:
+        return observed_row.status == Status.ARCHIVED
+    if observed_row.status == Status.ARCHIVED:
         return False
     return _FORWARD_ORDER.index(observed_row.status) >= _FORWARD_ORDER.index(
         attempted_to_status
@@ -367,9 +464,14 @@ def validate_transition(
     backends call this rather than reimplementing it (house rules' "adapters thin").
 
     Checks, in order: ``current is not None``; ``stage == to_status``; ``current.status``
-    is not terminal; ``to_status`` is in ``_LEGAL_TRANSITIONS[current.status]`` or
-    ``to_status == current.status`` (same-status retry, Assumption A2); if
-    ``to_status == Status.FAILED``, ``error_code`` is not ``None``.
+    is not terminal *unless* ``to_status`` is one of that terminal status's own
+    explicitly-legal targets (REQ-012: lets ``Status.FAILED``'s two named exits —
+    ``PENDING``/``ARCHIVED`` — through, while ``Status.INDEXED``/``Status.ARCHIVED``
+    themselves, whose legal-target sets are both empty, remain fully blocked exactly as
+    before); ``to_status`` is in ``_LEGAL_TRANSITIONS[current.status]`` or
+    ``to_status == current.status`` (same-status retry, Assumption A2 — note
+    ``Status.FAILED`` never satisfies this itself, since it is excluded from its own
+    legal-target set); if ``to_status == Status.FAILED``, ``error_code`` is not ``None``.
 
     Args:
         doc_id: The ``doc_id`` the caller is attempting to transition. Note: not part of
@@ -392,7 +494,10 @@ def validate_transition(
         _reject(doc_id, "unknown doc_id", None, to_status, stage)
     if stage != to_status:
         _reject(doc_id, "stage must equal to_status", current, to_status, stage)
-    if current.status in _TERMINAL_STATUSES:
+    if (
+        current.status in _TERMINAL_STATUSES
+        and to_status not in _LEGAL_TRANSITIONS[current.status]
+    ):
         _reject(
             doc_id, "no transitions out of terminal status", current, to_status, stage
         )
@@ -619,11 +724,24 @@ def _next_attempts(current: LedgerRow, to_status: Status) -> int:
 
     Returns:
         ``current.attempts`` unchanged if transitioning to ``Status.FAILED`` (frozen);
-        ``current.attempts + 1`` on a same-status retry; ``1`` on a legal forward advance
-        into a new non-terminal status (first attempt at that stage).
+        ``0`` on REQ-012's ``failed -> pending`` requeue edge specifically (a deliberate,
+        narrowly-scoped exception — see below); ``current.attempts + 1`` on a same-status
+        retry; ``1`` on any other legal forward advance into a new non-terminal status
+        (first attempt at that stage).
+
+        The ``failed -> pending`` case is intentionally distinct from every other
+        "advance into a new status" edge, which otherwise always yields ``1`` (see
+        below): ``Reprocessor.requeue()`` (REQ-012) resets a requeued document to look
+        exactly like a freshly-created row (``LedgerStore.create()`` also starts
+        ``attempts`` at ``0``) — its whole history at the stage it failed at is being
+        discarded, not continued, which ``1`` (first attempt already counted) would
+        misrepresent. This is the one and only place ``_next_attempts`` inspects
+        ``current.status`` on its own, rather than only comparing it to ``to_status``.
     """
     if to_status == Status.FAILED:
         return current.attempts
+    if current.status == Status.FAILED and to_status == Status.PENDING:
+        return 0
     if to_status == current.status:
         return current.attempts + 1
     return 1

@@ -6,9 +6,9 @@
 Revised twice after design-review REJECTs, both rounds confined to the concurrency/PERMANENT
 semantics fix for `LedgerTransitionInvalid` — **no `LedgerStore` method signature has changed in
 either round** (`create`/`transition`/`get`/`list_by_status` remain exactly as given by the story).
-A third, post-merge revision (below) additively extends this LLD's own transition table under a
-later REQ; it is a live-reference pointer, not a re-opening of the frozen historical record §1-§8
-below.
+A third and fourth, post-merge revision (below) additively extend this LLD's own transition table
+under later REQs; each is a live-reference pointer, not a re-opening of the frozen historical
+record §1-§8 below.
 
 **Round 1** — three findings:
 1. **[MAJOR]** A losing caller in a concurrent `transition()` race (§3 F7) raised
@@ -60,6 +60,31 @@ resolved before either side ever reaches `_FORWARD_ORDER.index()`. See `docs/sto
 for the full vertical-routing rationale (why ambiguity parks but a stated-but-missing
 vertical/scenario is a config error instead, and why `VERTICAL_UNRESOLVED` is classified PERMANENT
 even though the parked document is not dead) — that rationale is REQ-009's own, not restated here.
+
+**Round 4 (this revision, REQ-012)** — a second post-merge, additive extension of this LLD's own
+transition table, not a design-review REJECT: REQ-012 (Poison Queue Reprocessor) needed a way for
+an operator to bring a `failed` document back into the pipeline (`requeue`) or permanently retire
+one that will never succeed (`archive`). Unlike Round 3's `NEEDS_REVIEW` (never terminal to begin
+with), this re-opens a status — `Status.FAILED` — that was previously fully closed:
+`_TERMINAL_STATUSES` already included it, and `_LEGAL_TRANSITIONS[Status.FAILED]` was
+`frozenset()`. Two new named edges were added (`failed -> pending`, `failed -> archived`) plus a
+new terminal `Status.ARCHIVED` value (mapped to `frozenset()`, exactly like `Status.INDEXED`).
+Because `validate_transition`'s terminal-status check ran unconditionally before consulting
+`_LEGAL_TRANSITIONS`, simply adding the two edges to the table would not have been enough — the
+check itself was changed to reject a terminal status's outgoing transition only when the requested
+`to_status` is not among that status's own legal targets, which leaves `INDEXED`/`ARCHIVED` fully
+closed (empty target sets, unaffected) while letting `FAILED`'s two new named edges through and
+still rejecting its self-retry and every mid-pipeline target. The identical `is_benign_concurrent_
+loss`/`_FORWARD_ORDER` gap Rounds 2 and 3 each hit recurred a third time for `Status.ARCHIVED`
+(also absent from `_FORWARD_ORDER`, for the same structural reason `FAILED`/`NEEDS_REVIEW` are) and
+was fixed the same way: two more order-dependent special cases, resolved before either side reaches
+`_FORWARD_ORDER.index()`. Crucially, the `failed -> {pending, archived}` boundary is legal *in the
+table* but enforced only by convention — `validate_transition`/`transition()` have no concept of
+caller identity, so only `vestibule.reprocessor.reprocessor.Reprocessor.requeue()`/`archive()` are
+permitted, anywhere in this codebase, to actually request those edges on a `failed` row; no
+pipeline component does or may. See `docs/stories/REQ-012.md` for the full reprocessor rationale
+(list/summarize/requeue/archive semantics, the two new `REPROCESS_*` error codes) — not restated
+here.
 
 ## Assumptions (non-blocking, flagged per house rules)
 The story specifies the four `LedgerStore` methods, the `Status` values, and the legal-transition

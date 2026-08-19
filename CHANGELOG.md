@@ -6,6 +6,16 @@ Versioning: [SemVer](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- REQ-012: Poison Queue Reprocessor — `Reprocessor` closes the operational loop Phase 3
+  opened: `list_failed`/`summarize` surface what's currently `failed` and why (grouped by
+  error code and by inferred stage), `requeue`/`requeue_by_error_code` reset a failed
+  document to `pending` so it reprocesses from the top once its root cause is fixed
+  (bulk requeue capped by `max_batch_requeue`, per-doc results reported, concurrent
+  operator actions skipped rather than errored), and `archive` permanently retires a
+  document that will never succeed. Human-triggered only — no automatic requeuing is
+  introduced anywhere. Every ledger write goes through `is_benign_concurrent_loss`
+  triage, matching every other component that writes to the ledger. Registers two new
+  PERMANENT error codes, `REPROCESS_NOT_FAILED`/`REPROCESS_DOC_NOT_FOUND`.
 - REQ-011: Dynamic Index Provisioning — `IndexProvisioner` resolves the versioned
   `IndexTemplate` a document's index should be built from (explicit template dimensions, else
   `scenario.indexer.dimensions`) and creates the underlying index on first document for a
@@ -38,6 +48,16 @@ Versioning: [SemVer](https://semver.org/).
   (`SCENARIO_NOT_FOUND`), never silently downgraded to a park.
 
 ### Changed
+- REQ-012: extends REQ-003's ledger transition table a second time, additively — a new
+  terminal `Status.ARCHIVED` value, plus two new outgoing edges from the previously
+  fully-terminal `Status.FAILED`: `failed -> pending` (requeue) and `failed -> archived`
+  (archive). `Status.FAILED` remains rejected for self-retry and every mid-pipeline
+  target — only these two named edges are legal, and only
+  `Reprocessor.requeue()`/`archive()` are permitted to call them; no pipeline component
+  does or may. `is_benign_concurrent_loss` gained a matching `Status.ARCHIVED` special
+  case (mirroring the fix REQ-009 required for `Status.NEEDS_REVIEW`) so it continues to
+  never raise for the new status — see `docs/designs/REQ-003-lld.md`'s Revision note,
+  fourth entry.
 - REQ-009: extends REQ-003's ledger transition table, additively — a new non-terminal
   `Status.NEEDS_REVIEW` value and its legal transitions (`pending -> needs_review`,
   `needs_review -> pending`, `needs_review -> failed`); `indexed -> needs_review` remains
