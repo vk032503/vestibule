@@ -6,6 +6,20 @@ Versioning: [SemVer](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- REQ-011: Dynamic Index Provisioning — `IndexProvisioner` resolves the versioned
+  `IndexTemplate` a document's index should be built from (explicit template dimensions, else
+  `scenario.indexer.dimensions`) and creates the underlying index on first document for a
+  vertical/scenario, rather than requiring an index to be hand-provisioned in advance. Concurrent
+  first-arrivals for the same new index race safely: an atomic `register()` claim decides exactly
+  one winner, and a stale claim (a worker that stalled or crashed mid-provision) is safely
+  reclaimed by another worker via a compare-and-swap `reclaim()`, with `mark_ready`/`mark_failed`
+  both rejecting a reclaimed, now-stale claim token (`INDEX_PROVISION_CONFLICT`) rather than
+  clobbering the reclaimer's fresh entry. Drift detection compares a stored index's resolved
+  template/dimensions against the scenario's current expectations and flags mismatches rather
+  than silently indexing against the wrong shape. `IndexRegistry` backends: `InMemoryIndexRegistry`
+  (thread-safe, single-process) and `TableStorageIndexRegistry` (Azure Table Storage, optimistic
+  concurrency), plus a `CachedIndexRegistry` TTL-cache decorator to keep read-heavy lookups off
+  the network on the common already-provisioned path.
 - REQ-010: Scenario Config Store — per-vertical ingestion settings (`Scenario`), read at runtime,
   independent of redeployment. `YamlScenarioStore` (read-only, file-backed) and
   `TableStorageScenarioStore` (writable, Azure Table Storage-backed, optimistic concurrency via

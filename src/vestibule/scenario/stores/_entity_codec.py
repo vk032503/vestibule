@@ -39,7 +39,7 @@ def parse_datetime(value: Any) -> datetime:
 
 def scenario_to_entity_data(scenario: Scenario) -> dict[str, Any]:
     """Flattens `scenario` into Table Storage's flat-property entity shape."""
-    return {
+    data: dict[str, Any] = {
         "scenario_id": scenario.scenario_id,
         "vertical": scenario.vertical,
         "config_version": scenario.config_version,
@@ -53,6 +53,13 @@ def scenario_to_entity_data(scenario: Scenario) -> dict[str, Any]:
         "embedder_json": scenario.embedder.model_dump_json(),
         "indexer_json": scenario.indexer.model_dump_json(),
     }
+    # REQ-011 Assumption A1: omitted (never written as an explicit null) when None,
+    # so a pre-existing entity written before this REQ — which has no
+    # index_template_id property at all — deserializes cleanly on the read side via
+    # entity_to_scenario's data.get("index_template_id") default of None.
+    if scenario.index_template_id is not None:
+        data["index_template_id"] = scenario.index_template_id
+    return data
 
 
 def entity_to_scenario(record: "_TableEntityRecord") -> Scenario:
@@ -77,6 +84,7 @@ def entity_to_scenario(record: "_TableEntityRecord") -> Scenario:
             enabled=bool(data["enabled"]),
             created_at=parse_datetime(data["created_at"]),
             updated_at=parse_datetime(data["updated_at"]),
+            index_template_id=data.get("index_template_id"),
         )
     except (ValidationError, KeyError, ValueError) as exc:
         raise ScenarioError(

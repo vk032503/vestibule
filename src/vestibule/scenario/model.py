@@ -156,6 +156,12 @@ class Scenario(BaseModel):
             `False`).
         created_at: UTC timestamp this scenario was first created.
         updated_at: UTC timestamp this scenario was last edited.
+        index_template_id: REQ-011 — selects the `IndexTemplate` (by id) an
+            `IndexProvisioner` resolves for this scenario's `index_name`. `None`
+            (the default) means "use `config/index_provisioning.yaml`'s
+            `default_template_id`" — additive, non-breaking (REQ-011 Assumption A1):
+            every existing `Scenario(...)` call site continues to construct
+            successfully unchanged.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -172,6 +178,7 @@ class Scenario(BaseModel):
     enabled: bool
     created_at: datetime
     updated_at: datetime
+    index_template_id: str | None = None
 
     @field_validator("scenario_id", "vertical", "default_trust_tier")
     @classmethod

@@ -1,0 +1,84 @@
+index_provisioning:
+  registry_backend: in_memory        # in_memory | table_storage — selects which
+                                      # IndexRegistry backend the composition root
+                                      # constructs; not an IndexRegistry field
+
+  default_template_id: standard-v1   # operational tunable — code-authoritative, see below
+  template_directory: config/index_templates
+
+  provisioning_stale_after_seconds: 300    # operational tunable — code-authoritative
+  verification_interval_seconds: 300       # operational tunable — code-authoritative
+  wait_for_provisioning_timeout_seconds: 60 # operational tunable — code-authoritative
+  wait_poll_interval_seconds: 2             # operational tunable — code-authoritative
+                                             # (Assumption A8 — not in the story's own
+                                             # config list)
+  auto_create: true                  # operational tunable — code-authoritative
+
+  table_storage:
+    table_name: VestibuleIndexRegistry
+    connection_string_env_var: AZURE_TABLES_CONNECTION_STRING  # read from env at
+                                                                 # process start, never here
+    extra: table_storage             # pip install vestibule[table_storage]
+
+  registry_cache:
+    enabled: true                    # whether the composition root wraps the selected
+                                      # registry backend in a CachedIndexRegistry
+                                      # (Assumption A16) before constructing
+                                      # IndexProvisioner; not an IndexRegistry field
+    ttl_seconds: 10                  # operational tunable — code-authoritative, see below
+
+  azure_ai_search:
+    endpoint_env_var: AZURE_SEARCH_ENDPOINT     # reuses REQ-008's own indexer.yaml
+                                                 # azure_ai_search.endpoint_env_var verbatim —
+                                                 # see note below
+    api_key_env_var: AZURE_SEARCH_API_KEY       # reuses REQ-008's own indexer.yaml
+                                                 # azure_ai_search.api_key_env_var verbatim —
+                                                 # see note below
+    extra: azure_search               # pip install vestibule[azure_search] — already declared,
+                                       # REQ-008; no new extra introduced by this REQ
+
+  error_codes:
+    INDEX_TEMPLATE_NOT_FOUND: PERMANENT
+    INDEX_TEMPLATE_INVALID: PERMANENT
+    INDEX_SCHEMA_DRIFT: PERMANENT
+    INDEX_PROVISION_FAILED: PERMANENT
+    INDEX_RETIRED: PERMANENT
+    INDEX_AUTO_CREATE_DISABLED: PERMANENT
+    INDEX_PROVISION_TIMEOUT: TRANSIENT
+    INDEX_PROVISION_CONFLICT: TRANSIENT
+    INDEX_REGISTRY_UNAVAILABLE: TRANSIENT
+    INDEX_PROVISIONER_UNAVAILABLE: TRANSIENT
+    INDEX_PROVISIONER_DEPENDENCY_MISSING: PERMANENT
+
+# NOTE: every *_seconds/auto_create/default_template_id/template_directory tunable above is an
+# ordinary operational tunable (REQ-006 §6 Assumption A6 precedent) — authoritative defaults live
+# on ProvisioningConfig's own dataclass fields; kept in sync via a dedicated test
+# (test_config_index_provisioning_yaml_tunables_match_provisioning_config_defaults), since no
+# config-loading mechanism for *tunables* exists anywhere in this codebase yet.
+# registry_backend/table_storage.* select and configure which IndexRegistry backend the
+# composition root constructs (out of scope here) — mirrors config/scenario_store.yaml's
+# backend/table_storage.* block exactly.
+# registry_cache.ttl_seconds is a separate operational tunable (no bearing on Contract #2/#3
+# correctness, Assumption A16) — its authoritative default lives on CachedIndexRegistry's own
+# constructor default (vestibule/provisioning/stores/cached_registry.py), kept in sync via its
+# own dedicated test (test_config_index_provisioning_yaml_registry_cache_tunables_match_cached_index_registry_defaults,
+# mirroring config/scenario_store.yaml's test_config_scenario_store_yaml_tunables_match_code_defaults
+# precedent, REQ-010). Deliberately set to 10 seconds, well below CachedScenarioStore's own 60-second
+# default (config/scenario_store.yaml) — see Assumption A16 for why: _wait_for_ready's own polling
+# loop (§3.4 step 6) shares this module's registry.get() call with the hot ensure() fast path, and a
+# TTL too close to wait_for_provisioning_timeout_seconds (default 60) risks a waiting worker never
+# observing a genuine provisioning -> ready transition the live store already reflects.
+# registry_cache.enabled selects whether the composition root wraps the selected registry backend
+# in a CachedIndexRegistry (out of scope here) — mirrors config/scenario_store.yaml's own
+# cache.enabled block exactly.
+# azure_ai_search.endpoint_env_var/api_key_env_var name the environment variables the
+# composition root must read to construct AzureAISearchProvisioner — deliberately the exact
+# same env vars config/indexer.yaml's own azure_ai_search.endpoint_env_var/api_key_env_var already
+# name for REQ-008's AzureAISearchIndexer, not a new pair: AzureAISearchProvisioner and
+# AzureAISearchIndexer talk to the same Azure AI Search service, so reusing REQ-008's existing
+# credentials is the simpler, obvious choice over minting a second, redundant env-var pair for an
+# identical secret (house rules: secrets from env only; the actual endpoint URL and API key are
+# never written to this file or any code either way).
+# error_codes follows the same documentation/audit-only convention as config/errors.yaml's
+# known_codes: not read at runtime; the registry populated via register_error at import time
+# (vestibule/provisioning/model.py) is authoritative.

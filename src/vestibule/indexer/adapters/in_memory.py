@@ -62,6 +62,18 @@ class InMemoryIndexer(IndexerAdapter):
         """See `IndexerAdapter.supports_hybrid`. Always `False`."""
         return _SUPPORTS_HYBRID
 
+    @property
+    def schema(self) -> tuple[int, str] | None:
+        """The `(dimensions, metric)` schema set by `ensure_schema`, or `None` if
+        `ensure_schema` has never been called (REQ-011 Assumption A15).
+
+        Read-only accessor over this instance's existing private `_schema` state — no
+        setter is exposed, so a caller (e.g. `InMemoryProvisioner`, REQ-011) can
+        observe but never mutate this adapter's schema state directly; the only way to
+        set it remains `ensure_schema`.
+        """
+        return self._schema
+
     def ensure_schema(self, dimensions: int, metric: str) -> None:
         """See `IndexerAdapter.ensure_schema`.
 

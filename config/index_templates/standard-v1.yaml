@@ -1,0 +1,35 @@
+# Default shipped index template (REQ-011). Reproduces
+# vestibule/indexer/adapters/_azure_search_backend.py's _build_fields's exact 8-field
+# schema (Assumption A12 — deliberately not the superset of fields
+# _record_to_document also sends; AC9's regression guard is checked against this exact
+# list), generalizing REQ-008's previously-hardcoded schema into a versioned,
+# reviewable template.
+template_id: standard-v1
+template_version: "1"
+dimensions: null              # inherit scenario.indexer.dimensions (Assumption A2)
+metric: cosine                 # matches indexer.py's own _DEFAULT_METRIC (REQ-008)
+hnsw:
+  m: 4                         # matches AzureAISearchIndexer's own constructor defaults (REQ-008)
+  ef_construction: 400
+  ef_search: 500
+semantic_ranker_enabled: false  # REQ-008's ensure_schema never configured this — AC9 parity
+hybrid_enabled: false           # REQ-008's ensure_schema never configured this — AC9 parity
+fields:
+  - name: chunk_id
+    type: key
+  - name: content
+    type: text
+    searchable: true
+  - name: content_vector
+    type: vector
+    searchable: true
+  - name: doc_id
+    type: filterable_string
+  - name: doc_version
+    type: filterable_string
+  - name: allowed_groups
+    type: filterable_string_collection
+  - name: trust_tier
+    type: filterable_string
+  - name: config_version
+    type: filterable_string

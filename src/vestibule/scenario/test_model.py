@@ -85,6 +85,55 @@ def test_scenario_constructs_with_valid_fields() -> None:
     assert scenario.vertical == "hr"
 
 
+def test_scenario_index_template_id_defaults_to_none() -> None:
+    scenario = _scenario()
+    assert scenario.index_template_id is None
+
+
+def test_scenario_accepts_explicit_index_template_id() -> None:
+    scenario = _scenario(index_template_id="standard-v1")
+    assert scenario.index_template_id == "standard-v1"
+
+
+def test_scenario_existing_construction_call_shapes_unaffected_by_index_template_id_field() -> (
+    None
+):
+    """REQ-011 Assumption A1 — mirrors REQ-004's
+    `test_existing_constructor_signatures_unchanged` precedent: an exact pre-REQ-011
+    `Scenario(...)` call shape (omitting the new `index_template_id` keyword entirely)
+    continues to construct successfully, defaulting the new field to `None`."""
+    scenario = Scenario(
+        scenario_id="hr-policies-v1",
+        vertical="hr",
+        config_version="1",
+        index_name="vestibule-hr-v1",
+        chunker=ChunkerSettings(
+            target_chunk_tokens=512,
+            overlap_tokens=64,
+            min_chunk_tokens=40,
+            max_chunk_tokens=800,
+        ),
+        embedder=EmbedderSettings(
+            adapter="azure_openai",
+            model="text-embedding-3-large",
+            target_dimensions=1024,
+        ),
+        indexer=IndexerSettings(
+            metric="cosine",
+            dimensions=1024,
+            hnsw_m=4,
+            hnsw_ef_construction=400,
+            hnsw_ef_search=500,
+        ),
+        acl_source="envelope",
+        default_trust_tier="internal",
+        enabled=True,
+        created_at=_FIXED_TIME,
+        updated_at=_FIXED_TIME,
+    )
+    assert scenario.index_template_id is None
+
+
 def test_scenario_is_frozen() -> None:
     scenario = _scenario()
     with pytest.raises(ValidationError):
