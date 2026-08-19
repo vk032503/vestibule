@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import inspect
 import re
 import threading
@@ -35,7 +36,7 @@ _NON_TERMINAL: tuple[Status, ...] = (
     Status.INDEXING,
     Status.NEEDS_REVIEW,
 )
-_TERMINAL: tuple[Status, ...] = (Status.INDEXED, Status.FAILED)
+_TERMINAL: tuple[Status, ...] = (Status.INDEXED, Status.FAILED, Status.ARCHIVED)
 _ALL_STATUSES: tuple[Status, ...] = tuple(Status)
 
 _counter = iter(range(10_000_000))
@@ -57,6 +58,11 @@ def _build_row_at(store: InMemoryLedgerStore, doc_id: str, target: Status) -> Le
         # NEEDS_REVIEW (REQ-009) branches off PENDING directly; it has no position on
         # _FORWARD_ORDER's linear path, so it cannot be reached by the loop below.
         return store.transition(doc_id, Status.NEEDS_REVIEW, Status.NEEDS_REVIEW)
+    if target == Status.ARCHIVED:
+        # ARCHIVED (REQ-012) is reachable only from FAILED, via requeue()/archive()'s
+        # own edge — same off-linear-path reasoning as NEEDS_REVIEW above.
+        store.transition(doc_id, Status.FAILED, Status.FAILED, error_code="E")
+        return store.transition(doc_id, Status.ARCHIVED, Status.ARCHIVED)
     for status in _FORWARD_ORDER[1:]:
         row = store.transition(doc_id, status, status)
         if status == target:
@@ -204,6 +210,119 @@ def test_transition_from_terminal_failed_rejected() -> None:
     _build_row_at(store, doc_id, Status.FAILED)
     with pytest.raises(LedgerTransitionInvalid):
         store.transition(doc_id, Status.ANALYZING, Status.ANALYZING)
+
+
+# --- REQ-012: `failed -> {pending, archived}` transition-table extension ---------------
+#
+# Deliberate, understood update to this file's own pre-REQ-012 terminality assumptions:
+# `Status.FAILED` no longer rejects every outgoing transition unconditionally — it now
+# permits exactly two named exits (`PENDING` via requeue, `ARCHIVED` via archive), both
+# added to `_LEGAL_TRANSITIONS[Status.FAILED]` above. `test_transition_from_terminal_
+# failed_rejected` immediately above this comment is intentionally left unmodified and
+# still passes as-is: `FAILED -> ANALYZING` is not one of the two new edges, so it
+# remains illegal, exactly as it always was. No pre-existing test in this file asserted
+# `FAILED -> PENDING`/`FAILED -> ARCHIVED` were illegal (grep confirms this), so there
+# was nothing incorrect to silently leave passing — the tests below make the new
+# boundary explicit rather than leaving it implicit.
+
+
+def test_failed_to_pending_and_archived_are_legal_at_table_level() -> None:
+    """`validate_transition`'s table-level view of the boundary: both new edges are
+    exactly, and only, `PENDING`/`ARCHIVED` — see `test_transition_each_legal_edge_in_
+    table[FAILED-pending]`/`[FAILED-archived]` (auto-parametrized from this same dict)
+    for the corresponding through-the-store proof."""
+    assert _LEGAL_TRANSITIONS[Status.FAILED] == frozenset(
+        {Status.PENDING, Status.ARCHIVED}
+    )
+
+
+def test_failed_self_retry_still_rejected_after_req012() -> None:
+    """`FAILED -> FAILED` is deliberately excluded from the two new named exits — a
+    requeue/archive is a one-shot operator action, not a retry-in-place."""
+    store = InMemoryLedgerStore()
+    doc_id = _new_doc_id("failed-self-retry-req012")
+    _build_row_at(store, doc_id, Status.FAILED)
+    with pytest.raises(LedgerTransitionInvalid) as exc_info:
+        store.transition(doc_id, Status.FAILED, Status.FAILED, error_code="E")
+    assert exc_info.value.classification == "PERMANENT"
+
+
+@pytest.mark.parametrize(
+    "mid_pipeline_status",
+    [
+        Status.ANALYZING,
+        Status.CHUNKING,
+        Status.EMBEDDING,
+        Status.INDEXING,
+        Status.NEEDS_REVIEW,
+    ],
+)
+def test_failed_to_mid_pipeline_status_still_rejected_after_req012(
+    mid_pipeline_status: Status,
+) -> None:
+    """Only `PENDING`/`ARCHIVED` are legal targets from `FAILED` — REQ-012 did not
+    generally reopen the pipeline from a failed row."""
+    store = InMemoryLedgerStore()
+    doc_id = _new_doc_id(f"failed-to-{mid_pipeline_status.value}-req012")
+    _build_row_at(store, doc_id, Status.FAILED)
+    with pytest.raises(LedgerTransitionInvalid) as exc_info:
+        store.transition(doc_id, mid_pipeline_status, mid_pipeline_status)
+    assert exc_info.value.classification == "PERMANENT"
+
+
+@pytest.mark.parametrize(
+    "to_status",
+    [s for s in Status if s != Status.ARCHIVED],
+)
+def test_archived_is_terminal_no_outgoing_transitions(to_status: Status) -> None:
+    """`ARCHIVED` (REQ-012) permits no transition out at all, including no self-retry —
+    the same fully-closed shape as `INDEXED`."""
+    store = InMemoryLedgerStore()
+    doc_id = _new_doc_id(f"archived-to-{to_status.value}")
+    _build_row_at(store, doc_id, Status.ARCHIVED)
+    error_code = "E" if to_status == Status.FAILED else None
+    with pytest.raises(LedgerTransitionInvalid) as exc_info:
+        store.transition(doc_id, to_status, to_status, error_code=error_code)
+    assert exc_info.value.classification == "PERMANENT"
+
+
+_PIPELINE_MODULES: tuple[str, ...] = (
+    "vestibule.analyzer.analyzer",
+    "vestibule.chunker.chunker",
+    "vestibule.embedder.embedder",
+    "vestibule.indexer.indexer",
+    "vestibule.vertical.loader",
+)
+
+
+def test_no_pipeline_module_source_calls_transition_to_pending_or_archived() -> None:
+    """Documents, and mechanically checks what *can* be mechanically checked, about the
+    REQ-012 boundary: `failed -> {pending, archived}` is legal *in the transition
+    table*, but only `vestibule.reprocessor.reprocessor.Reprocessor.requeue()`/
+    `archive()` are permitted to actually call `ledger.transition(...,
+    to_status=Status.PENDING)`/`to_status=Status.ARCHIVED)` on a row that is currently
+    `failed`. `validate_transition`/`LedgerStore.transition()` have no concept of caller
+    identity, so this boundary can never be enforced or tested at that layer — no
+    exception, no return value, no table entry can distinguish "an operator called
+    this" from "pipeline code called this." What *is* mechanically checkable, and is
+    checked here: none of this codebase's five pipeline-stage modules
+    (`Analyzer`/`Chunker`/`Embedder`/`Indexer`/`VerticalLoader`) contains a source-level
+    call requesting `to_status=Status.PENDING` or `to_status=Status.ARCHIVED` today —
+    a regression guard, not a semantic proof. `vestibule.reprocessor.reprocessor` and
+    `vestibule.vertical.review_queue` (whose `assign()` legitimately transitions a
+    `needs_review` row — never a `failed` one — back to `pending`) are intentionally
+    excluded from this scan; enforcement of the actual semantic boundary rests on this
+    documented convention plus code review, not on any test.
+    """
+    for module_name in _PIPELINE_MODULES:
+        module = importlib.import_module(module_name)
+        source = inspect.getsource(module)
+        assert re.search(r"to_status\s*=\s*Status\.PENDING", source) is None, (
+            module_name
+        )
+        assert re.search(r"to_status\s*=\s*Status\.ARCHIVED", source) is None, (
+            module_name
+        )
 
 
 def test_transition_to_failed_without_error_code_rejected() -> None:
@@ -681,6 +800,65 @@ def test_is_benign_concurrent_loss_false_when_observed_needs_review_and_attempte
     """NEEDS_REVIEW has no well-defined position relative to the ordinary pipeline's
     forward path, so a race against a concurrent parking is never treated as benign."""
     observed = _row(Status.NEEDS_REVIEW)
+    result = is_benign_concurrent_loss(
+        observed, attempted_to_status, attempted_to_status
+    )
+    assert result is False
+
+
+# --- REQ-012: is_benign_concurrent_loss ARCHIVED special cases (Round 4) ---------------
+
+
+def test_is_benign_concurrent_loss_true_when_attempted_archived_and_observed_archived() -> (
+    None
+):
+    """A concurrent winner already applied the exact same `failed -> archived` edge."""
+    observed = _row(Status.ARCHIVED)
+    result = is_benign_concurrent_loss(observed, Status.ARCHIVED, Status.ARCHIVED)
+    assert result is True
+
+
+@pytest.mark.parametrize(
+    "observed_status",
+    [
+        Status.PENDING,
+        Status.ANALYZING,
+        Status.CHUNKING,
+        Status.EMBEDDING,
+        Status.INDEXING,
+        Status.INDEXED,
+        Status.FAILED,
+        Status.NEEDS_REVIEW,
+    ],
+)
+def test_is_benign_concurrent_loss_false_when_attempted_archived_and_observed_other(
+    observed_status: Status,
+) -> None:
+    """Every other observed status (including a concurrent requeue back to `pending`,
+    or the row still showing `failed`) is conservatively not treated as benign for an
+    archive attempt."""
+    observed = _row(observed_status)
+    result = is_benign_concurrent_loss(observed, Status.ARCHIVED, Status.ARCHIVED)
+    assert result is False
+
+
+@pytest.mark.parametrize(
+    "attempted_to_status",
+    [
+        Status.PENDING,
+        Status.ANALYZING,
+        Status.CHUNKING,
+        Status.EMBEDDING,
+        Status.INDEXING,
+    ],
+)
+def test_is_benign_concurrent_loss_false_when_observed_archived_and_attempted_other(
+    attempted_to_status: Status,
+) -> None:
+    """`ARCHIVED` has no well-defined position relative to the ordinary pipeline's
+    forward path, so a race against a concurrent archive is never treated as benign —
+    same conservative default as the NEEDS_REVIEW-observed case above."""
+    observed = _row(Status.ARCHIVED)
     result = is_benign_concurrent_loss(
         observed, attempted_to_status, attempted_to_status
     )

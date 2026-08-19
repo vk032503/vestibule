@@ -57,6 +57,8 @@ errors:
     INDEX_REGISTRY_UNAVAILABLE: TRANSIENT
     INDEX_PROVISIONER_UNAVAILABLE: TRANSIENT
     INDEX_PROVISIONER_DEPENDENCY_MISSING: PERMANENT
+    REPROCESS_NOT_FAILED: PERMANENT
+    REPROCESS_DOC_NOT_FOUND: PERMANENT
 
 # NOTE: unknown_code_default_severity and known_codes are listed here for
 # documentation/audit visibility only, following the exact precedent set by
