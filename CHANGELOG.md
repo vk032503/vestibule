@@ -79,7 +79,10 @@ Versioning: [SemVer](https://semver.org/).
 - _(none yet)_
 
 ### Fixed
-- _(none yet)_
+- Chunker: strategy dispatch is now per-region instead of document-wide. Previously,
+  any document containing a single heading routed all prose through structure-aware
+  chunking, so the recursive strategy never ran on realistic documents. Prose regions
+  with no governing heading (e.g. a preamble) now correctly use recursive chunking.
 
 ### Security
 - _(none yet)_
