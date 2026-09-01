@@ -98,6 +98,30 @@ def _load_fastembed_adapter() -> FastEmbedEmbedder:
         raise
 
 
+def _inject_demo_preamble_element(elements: list[Element]) -> list[Element]:
+    """Prepends one synthetic `ElementType.PARAGRAPH` element before the document's
+    first `HEADING`, so the Chunker's recursive strategy has a genuine ungoverned
+    preamble to dispatch to (issue #18's per-region dispatch fix): a document's
+    preamble — any content before its first `HEADING` — is not "governed by a
+    heading" and so uses `RecursiveChunkStrategy`, while every heading-governed region
+    uses `StructureAwareChunkStrategy`.
+
+    `PyMuPDFParser` (REQ-005) extracts `sample.pdf` starting directly at its title
+    `HEADING`, with no leading prose — so there is no genuine preamble in the real
+    parser output to exercise this path. Mirrors `_inject_demo_table_element`'s
+    rationale for synthesizing what the real extraction doesn't happen to produce.
+    """
+    preamble = Element(
+        type=ElementType.PARAGRAPH,
+        text=(
+            "Document control notice: this field guide is reviewed annually by the "
+            "operations team and supersedes all prior revisions."
+        ),
+        metadata={"page": 1},
+    )
+    return [preamble, *elements]
+
+
 def _inject_demo_table_element(elements: list[Element]) -> list[Element]:
     """Appends one synthetic `ElementType.TABLE` element so the Chunker's
     table-atomic strategy runs, alongside the structure-aware/recursive strategies
@@ -177,6 +201,12 @@ def main() -> None:
     counts = Counter(e.type.value for e in elements)
     print(f"Extracted {len(elements)} elements: {dict(counts)}")
 
+    elements = _inject_demo_preamble_element(elements)
+    print(
+        "Added 1 synthetic PARAGRAPH element before the first heading (PyMuPDFParser "
+        "extracts sample.pdf starting at its title heading, with no leading prose — "
+        "see _inject_demo_preamble_element's docstring for why)."
+    )
     elements = _inject_demo_table_element(elements)
     print(
         "Added 1 synthetic TABLE element (PyMuPDFParser has no table detection — "
@@ -189,13 +219,6 @@ def main() -> None:
     chunks = chunker.chunk(envelope, elements)
     strategy_counts = Counter(chunk.metadata.get("strategy") for chunk in chunks)
     print(f"Produced {len(chunks)} chunks: {dict(strategy_counts)}")
-    if "recursive" not in strategy_counts:
-        print(
-            "(No 'recursive' chunks: Chunker._dispatch_region routes every "
-            "non-table region through structure-aware once *any* heading exists "
-            "anywhere in the document — recursive only activates for documents "
-            "with zero headings at all. This fixture has headings.)"
-        )
     for chunk in chunks:
         section = chunk.metadata.get("section_path") or "(no section)"
         preview = chunk.text.strip().replace("\n", " ")[:60]

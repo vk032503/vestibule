@@ -259,6 +259,14 @@ class Chunker:
     def _assemble_chunks(self, doc_id: str, elements: list[Element]) -> list[Chunk]:
         """LLD §3 steps 3-8: partition, dispatch, merge, concatenate, assign identity.
 
+        Strategy dispatch is per-region, not document-wide (LLD §3 step 5, issue #18
+        fix): a running "governed by a heading" flag is carried in document order.
+        Each `NON_TABLE` region is further split at its own first `HEADING` boundary
+        (`_split_at_first_heading`) so that a preamble slice preceding a document's
+        first-ever `HEADING` is dispatched on the flag's *prior* value (recursive),
+        while the slice from that `HEADING` onward is always dispatched as governed
+        (structure-aware) and the flag is set for every subsequent region.
+
         Args:
             doc_id: The document's `doc_id`, threaded into `derive_chunk_id`.
             elements: The `Element`s to chunk.
@@ -266,25 +274,58 @@ class Chunker:
         Returns:
             The assembled `Chunk`s, in document order.
         """
-        has_headings = any(element.type is ElementType.HEADING for element in elements)
         all_drafts: list[ChunkDraft] = []
+        governed_by_heading = False
         for region in _partition_regions(elements):
-            region_drafts = self._dispatch_region(
-                region, has_headings=has_headings, doc_id=doc_id
-            )
-            all_drafts.extend(
-                _merge_undersized_tail(region_drafts, self._config, self._token_counter)
+            if region.kind is _RegionKind.TABLE:
+                all_drafts.extend(
+                    self._dispatch_and_merge(region, governed_by_heading, doc_id)
+                )
+                continue
+            for slice_elements, slice_governed in _split_at_first_heading(
+                region.elements, governed_by_heading
+            ):
+                slice_region = _Region(
+                    kind=_RegionKind.NON_TABLE, elements=slice_elements
+                )
+                all_drafts.extend(
+                    self._dispatch_and_merge(slice_region, slice_governed, doc_id)
+                )
+            governed_by_heading = governed_by_heading or any(
+                element.type is ElementType.HEADING for element in region.elements
             )
         return _assign_positions(doc_id, all_drafts)
 
+    def _dispatch_and_merge(
+        self, region: _Region, governed_by_heading: bool, doc_id: str
+    ) -> list[ChunkDraft]:
+        """LLD §3 steps 5-6: dispatches one region/slice, then merges its undersized tail.
+
+        Args:
+            region: The region (or `NON_TABLE` heading-boundary slice) to dispatch.
+            governed_by_heading: See `_dispatch_region`.
+            doc_id: The document's `doc_id`, passed through for `table_atomic`'s F4 log.
+
+        Returns:
+            That region's `ChunkDraft`s, after the Assumption A8 merge pass.
+        """
+        region_drafts = self._dispatch_region(
+            region, governed_by_heading=governed_by_heading, doc_id=doc_id
+        )
+        return _merge_undersized_tail(region_drafts, self._config, self._token_counter)
+
     def _dispatch_region(
-        self, region: _Region, *, has_headings: bool, doc_id: str
+        self, region: _Region, *, governed_by_heading: bool, doc_id: str
     ) -> list[ChunkDraft]:
         """LLD §3 step 5: dispatches one region to the appropriate `ChunkStrategy`.
 
         Args:
-            region: The region to dispatch.
-            has_headings: Whether the whole document contains any `HEADING` element.
+            region: The region (or `NON_TABLE` heading-boundary slice, per
+                `_split_at_first_heading`) to dispatch.
+            governed_by_heading: Whether a `HEADING` element has appeared anywhere in
+                the document up to and including this region/slice (i.e. it contains a
+                `HEADING` itself, or an earlier one already did). Ignored for `TABLE`
+                regions, which always dispatch to `table_atomic`.
             doc_id: The document's `doc_id`, passed through for `table_atomic`'s F4 log.
 
         Returns:
@@ -299,7 +340,7 @@ class Chunker:
                 caption_text=region.caption_text,
                 doc_id=doc_id,
             )
-        strategy = self._structure_aware if has_headings else self._recursive
+        strategy = self._structure_aware if governed_by_heading else self._recursive
         return strategy.chunk_region(
             region.elements, config=self._config, token_counter=self._token_counter
         )
@@ -362,6 +403,43 @@ def _partition_regions(elements: Sequence[Element]) -> list[_Region]:
     if buffer:
         regions.append(_Region(kind=_RegionKind.NON_TABLE, elements=buffer))
     return regions
+
+
+def _split_at_first_heading(
+    elements: list[Element], governed_by_heading: bool
+) -> list[tuple[list[Element], bool]]:
+    """Splits one `NON_TABLE` region at its first `HEADING` boundary (issue #18 fix).
+
+    A region's own preamble — any elements before its first `HEADING` — inherits the
+    running "governed by a heading" state from *before* this region (so a document's
+    true preamble, with no prior `HEADING` anywhere, dispatches as ungoverned/recursive
+    even when a later `HEADING` occurs in the same region). Everything from that first
+    `HEADING` onward is always governed (that `HEADING` makes it so).
+
+    Args:
+        elements: One `NON_TABLE` region's elements, in document order.
+        governed_by_heading: The running state as of just before this region.
+
+    Returns:
+        One `(slice_elements, governed)` pair if `elements` contains no `HEADING`;
+        otherwise two pairs — the (possibly empty, then omitted) preamble slice and the
+        first-`HEADING`-onward slice, in document order.
+    """
+    first_heading = next(
+        (
+            i
+            for i, element in enumerate(elements)
+            if element.type is ElementType.HEADING
+        ),
+        None,
+    )
+    if first_heading is None:
+        return [(elements, governed_by_heading)]
+    slices: list[tuple[list[Element], bool]] = []
+    if first_heading > 0:
+        slices.append((elements[:first_heading], governed_by_heading))
+    slices.append((elements[first_heading:], True))
+    return slices
 
 
 def _caption_for_table(elements: Sequence[Element], table_index: int) -> str | None:

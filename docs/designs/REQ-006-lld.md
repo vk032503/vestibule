@@ -26,6 +26,19 @@ Revised after a design-review REJECT — five findings, all addressed in this re
    `section_path` in a future REQ. The flat `section_path` design itself is unchanged.
 5. **[MINOR]** Pinned `tiktoken`/`langchain-text-splitters` version constraints in §6.
 
+## Amendment (issue #18)
+
+The story's original "any document containing `HEADING` elements → structure-aware for the prose
+regions between headings" wording was ambiguous between document-wide and per-region readings; the
+shipped implementation read it document-wide, making `RecursiveChunkStrategy` unreachable for
+almost any real document (nearly all of which contain at least one heading somewhere). Corrected to
+the per-region reading the story intended: a `NON_TABLE` region dispatches to `structure_aware`
+only if a `HEADING` element has appeared anywhere in the document up to and including that region
+itself (its own content, or an earlier region's); otherwise it dispatches to `recursive` — covering
+both a preamble region before the document's first heading and every region of a headingless
+document. §3 step 4/step 5 updated; no interface, config, or error-code change. See
+`docs/stories/REQ-006.md`'s own amendment note for the corresponding story-level wording fix.
+
 ## Assumptions (non-blocking, flagged per house rules — same pattern as REQ-004/REQ-005)
 
 The story specifies the `Chunker` interface, the `Chunk` model, three strategies, and four
@@ -359,23 +372,44 @@ rows (REQ-003) via `LedgerStore`, keyed on `envelope.doc_id`, exactly as `Analyz
    each `TABLE` element is its own single-element region (`kind=TABLE`); every maximal run of
    non-`TABLE` elements between/around tables is one region (`kind=NON_TABLE`). Document order
    is preserved by construction — regions are never reordered.
-4. Compute `has_headings = any(e.type is ElementType.HEADING for e in elements)` once, globally.
-5. For each region, in order:
+4. Track a running `governed_by_heading` boolean, updated in document order as regions are
+   visited (issue #18 fix — dispatch is per-region, not a single document-wide fact), initialized
+   `False`. A `NON_TABLE` region is further split, for dispatch purposes only, at its own first
+   `HEADING` element's index (`_split_at_first_heading`): the (possibly empty, then omitted)
+   slice *before* that index inherits the running flag's value from *before* this region; the
+   slice *from* that index onward is unconditionally governed (`True`) — that `HEADING` is what
+   makes it so. A region with no `HEADING` at all is a single slice, dispatched on the running
+   flag unchanged. After a region's slice(s) are dispatched, the running flag is updated to
+   `governed_by_heading or any(e.type is ElementType.HEADING for e in region.elements)` for every
+   subsequent region. `TABLE` regions never read or update this flag, and are never split. This
+   split is why a preamble immediately followed by a heading *within the same `NON_TABLE` region*
+   (no intervening `TABLE`) still dispatches its preamble slice as ungoverned — the "governed by a
+   heading" fact is evaluated at the finer slice granularity, not only at `_partition_regions`'
+   coarser table-delimited granularity.
+5. For each region/slice, in order:
    - `kind=TABLE` → look up the immediately preceding element in the *original* element stream
      for the Assumption A2 caption heuristic; call `table_atomic_strategy.chunk_region([table],
      config=config, token_counter=token_counter, caption_text=caption_or_none)`. Always returns
      exactly one `ChunkDraft` (possibly logging an oversized-table advisory, F4 below — never
      raises for this reason).
-   - `kind=NON_TABLE`, `has_headings` → `structure_aware_strategy.chunk_region(region, ...)`.
-   - `kind=NON_TABLE`, not `has_headings` → `recursive_strategy.chunk_region(region, ...)`.
+   - `kind=NON_TABLE`, slice is governed (per step 4) → `structure_aware_strategy.chunk_region(
+     slice, ...)`. This covers both a slice starting at its region's own first `HEADING` and a
+     later headingless region continuing an already-open section (e.g. the prose resuming after a
+     `TABLE` interruption within the same section).
+   - `kind=NON_TABLE`, slice is not governed → `recursive_strategy.chunk_region(slice, ...)`.
+     This covers a preamble slice before the document's first `HEADING` (whether or not that
+     `HEADING` is in the same `_partition_regions` region), and every region in a document with
+     zero `HEADING` elements at all.
    Each call may raise `ChunkerError(TOKENIZER_LOAD_FAILED)` (F2) or an unmapped exception (F3).
-6. Immediately after each region's strategy call returns, apply the min-chunk merge pass
-   (Assumption A8) to that region's own `list[ChunkDraft]` only: while the region's last draft's
+6. Immediately after each region/slice's strategy call returns, apply the min-chunk merge pass
+   (Assumption A8) to that call's own `list[ChunkDraft]` only: while the last draft's
    `token_count < config.min_chunk_tokens`, `len(region_drafts) > 1`, and neither the last draft
    nor its predecessor has `metadata["strategy"] == STRATEGY_TABLE_ATOMIC`, merge the last draft
    into its predecessor (concatenate text, union `element_types`, recompute `token_count` via
-   `token_counter.count`, keep the predecessor's `section_path`/`page`) and repeat.
-7. Concatenate every region's (merged) `ChunkDraft`s back into one document-ordered list.
+   `token_counter.count`, keep the predecessor's `section_path`/`page`) and repeat. A `NON_TABLE`
+   region's two heading-boundary slices (step 4) are merged independently — the pass never reaches
+   across that slice boundary.
+7. Concatenate every region/slice's (merged) `ChunkDraft`s back into one document-ordered list.
 8. Assign `position = index` for `index, draft in enumerate(...)`; derive
    `chunk_id = derive_chunk_id(doc_id, position)` (REQ-002, Assumption A7); build each `Chunk`.
 9. `Chunker` calls `ledger.transition(doc_id, to_status=Status.EMBEDDING,

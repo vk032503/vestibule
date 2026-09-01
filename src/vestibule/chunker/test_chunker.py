@@ -205,6 +205,94 @@ def test_mixed_document_headings_paragraphs_table_list_produces_coherent_chunk_s
         assert chunk.chunk_id == derive_chunk_id(envelope.doc_id, chunk.position)
 
 
+# --- per-region dispatch (issue #18 fix) ----------------------------------------------------
+
+
+def test_zero_headings_document_dispatches_every_region_to_recursive() -> None:
+    """A document with no HEADING elements at all: every region is ungoverned, so every
+    prose chunk is dispatched to recursive (never structure-aware)."""
+    chunker, ledger = _build_chunker()
+    envelope = make_envelope("zero-headings")
+    _seed_chunking(ledger, envelope.doc_id)
+    elements = [
+        paragraph("First plain paragraph, no headings anywhere in this document."),
+        table([["a", "b"]]),
+        paragraph("Second plain paragraph, still no headings."),
+    ]
+
+    chunks = chunker.chunk(envelope, elements)
+
+    prose_chunks = [
+        c for c in chunks if c.metadata["strategy"] != STRATEGY_TABLE_ATOMIC
+    ]
+    assert prose_chunks  # sanity: there is prose to assert over
+    for chunk in prose_chunks:
+        assert chunk.metadata["strategy"] == STRATEGY_RECURSIVE
+
+
+def test_preamble_before_first_heading_dispatches_to_recursive_not_structure_aware() -> (
+    None
+):
+    """A preamble before the document's first HEADING is ungoverned (issue #18) and must
+    dispatch to recursive; the post-heading content is governed and must dispatch to
+    structure-aware. Both are part of the *same* NON_TABLE region at `_partition_regions`
+    granularity (no TABLE splits them) — this exercises the orchestrator's own
+    `_split_at_first_heading` slicing within one region, not its cross-region running
+    state (see the table-interruption test below for that case)."""
+    chunker, ledger = _build_chunker()
+    envelope = make_envelope("preamble-before-heading")
+    _seed_chunking(ledger, envelope.doc_id)
+    elements = [
+        paragraph("Preamble."),
+        heading("1. Scope"),
+        paragraph("Prose under Scope."),
+    ]
+
+    chunks = chunker.chunk(envelope, elements)
+
+    preamble_chunks = [c for c in chunks if c.metadata["section_path"] is None]
+    governed_chunks = [c for c in chunks if c.metadata["section_path"] is not None]
+    assert preamble_chunks
+    assert governed_chunks
+    for chunk in preamble_chunks:
+        assert chunk.metadata["strategy"] == STRATEGY_RECURSIVE
+    for chunk in governed_chunks:
+        assert chunk.metadata["strategy"] == STRATEGY_STRUCTURE_AWARE
+
+
+def test_heading_governed_section_continues_structure_aware_across_table_interruption() -> (
+    None
+):
+    """Worked example from issue #18: [Preamble, TABLE, Heading1, ParaA, TABLE, ParaB].
+    region1=[Preamble] (no heading seen yet) -> recursive; region2=[Heading1, ParaA]
+    (contains a heading) -> structure-aware; region3=[ParaB] (no heading of its own, but
+    a heading occurred earlier in the document) -> still structure-aware. This is the
+    orchestrator's cross-region running `governed_by_heading` state, not the
+    strategy's own internal per-region bookkeeping."""
+    chunker, ledger = _build_chunker()
+    envelope = make_envelope("table-interruption-continuation")
+    _seed_chunking(ledger, envelope.doc_id)
+    elements = [
+        paragraph("Preamble."),
+        table([["a", "b"]]),
+        heading("1. Scope"),
+        paragraph("ParaA."),
+        table([["c", "d"]]),
+        paragraph("ParaB."),
+    ]
+
+    chunks = chunker.chunk(envelope, elements)
+
+    preamble_chunks = [c for c in chunks if c.text == "Preamble."]
+    para_b_chunks = [c for c in chunks if "ParaB" in c.text]
+    assert preamble_chunks
+    assert para_b_chunks
+    for chunk in preamble_chunks:
+        assert chunk.metadata["strategy"] == STRATEGY_RECURSIVE
+    for chunk in para_b_chunks:
+        assert chunk.metadata["strategy"] == STRATEGY_STRUCTURE_AWARE
+
+
 # --- Assumption A2 caption adjacency, exercised via the orchestrator's own heuristic --------
 
 
