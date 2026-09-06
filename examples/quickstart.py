@@ -40,7 +40,7 @@ from collections import Counter
 from pathlib import Path
 
 from vestibule.analyzer.analyzer import Analyzer, AnalyzerConfig
-from vestibule.analyzer.model import DetectedType, Element, ElementType
+from vestibule.analyzer.model import DetectedType
 from vestibule.analyzer.parsers.pymupdf_parser import PyMuPDFParser
 from vestibule.analyzer.registry import ParserRegistry
 from vestibule.chunker.chunker import Chunker, ChunkerConfig
@@ -98,42 +98,6 @@ def _load_fastembed_adapter() -> FastEmbedEmbedder:
         raise
 
 
-def _inject_demo_table_element(elements: list[Element]) -> list[Element]:
-    """Appends one synthetic `ElementType.TABLE` element so the Chunker's
-    table-atomic strategy runs, alongside the structure-aware/recursive strategies
-    the real parser output already exercises.
-
-    `PyMuPDFParser` (REQ-005) classifies every text block as HEADING or PARAGRAPH
-    only — it has no table-detection logic; only `DocumentIntelligenceParser` (the
-    Azure Document Intelligence adapter, REQ-005) extracts `ElementType.TABLE`
-    elements, via its `prebuilt-layout` model's cell grid. Since this script is
-    explicitly the zero-cloud-credentials path, that adapter isn't available here.
-
-    The element below uses the exact `metadata["cells"]` shape
-    (`row_index`/`column_index`/`content`) `DocumentIntelligenceParser` produces, so
-    `TableAtomicChunkStrategy` (REQ-006) serializes it exactly as it would a real
-    Document-Intelligence-extracted table — the only thing simulated is *detection*,
-    not chunking.
-    """
-    cells: list[dict[str, int | str]] = [
-        {"row_index": 0, "column_index": 0, "content": "Region"},
-        {"row_index": 0, "column_index": 1, "content": "2024 Yield (tons)"},
-        {"row_index": 0, "column_index": 2, "content": "2025 Yield (tons)"},
-        {"row_index": 1, "column_index": 0, "content": "Northgate Block"},
-        {"row_index": 1, "column_index": 1, "content": "412"},
-        {"row_index": 1, "column_index": 2, "content": "438"},
-        {"row_index": 2, "column_index": 0, "content": "Millbrook Block"},
-        {"row_index": 2, "column_index": 1, "content": "356"},
-        {"row_index": 2, "column_index": 2, "content": "371"},
-    ]
-    table_element = Element(
-        type=ElementType.TABLE,
-        text="\n".join(str(cell["content"]) for cell in cells),
-        metadata={"cells": cells, "page": 2},
-    )
-    return [*elements, table_element]
-
-
 def _l2_normalize(vector: list[float]) -> list[float]:
     """Truncates to `_TARGET_DIMENSIONS` and L2-normalizes, mirroring exactly what
     `Embedder` does internally (REQ-007) — the query vector must land in the same
@@ -176,12 +140,6 @@ def main() -> None:
     elements = analyzer.analyze(envelope, io.BytesIO(pdf_bytes))
     counts = Counter(e.type.value for e in elements)
     print(f"Extracted {len(elements)} elements: {dict(counts)}")
-
-    elements = _inject_demo_table_element(elements)
-    print(
-        "Added 1 synthetic TABLE element (PyMuPDFParser has no table detection — "
-        "see _inject_demo_table_element's docstring for why)."
-    )
 
     # --- 5. Chunker ----------------------------------------------------------------
     _print_header("2. CHUNKER")
