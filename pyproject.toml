@@ -1,5 +1,5 @@
 [project]
-name = "vestibule"
+name = "vestibule-rag"
 version = "0.3.0"
 requires-python = ">=3.11"
 dependencies = [
