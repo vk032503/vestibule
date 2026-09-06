@@ -23,6 +23,21 @@ Revised after a design-review REJECT — two findings, both addressed in this re
    documentation-only PR deliverable, not a designed interface, consistent with how this LLD flags
    its other scope decisions.
 
+**Round 2 (this revision, `fix/pymupdf-table-detection`)** — a post-merge, additive extension of
+`PyMuPDFParser`'s interface, not a design-review REJECT: this LLD originally scoped
+`PyMuPDFParser` to `Element(PARAGRAPH | HEADING, ...)` only, leaving `TABLE` extraction exclusive
+to `DocumentIntelligenceParser`. That left digital PDFs with tables (no OCR/Document Intelligence
+routing) with no way to reach `TableAtomicChunkStrategy` at all. `PyMuPDFParser` now also detects
+tables via pymupdf's own `find_tables()` API and emits `Element(TABLE, ...)` with the same
+`metadata["cells"]` shape (`row_index`/`column_index`/`content`) `DocumentIntelligenceParser`
+already produces, so the Chunker's table-atomic strategy handles output from either adapter
+identically — no `Chunker` change required. Text blocks whose bounding box falls inside a detected
+table's bounding box are excluded from `PARAGRAPH`/`HEADING` extraction so a table's own text is
+never double-emitted as prose. §1 (`PyMuPDFParser` docstring) and §2 (data model note) updated
+accordingly; §3–§8 are unaffected — no new error code, ledger transition, or config surface is
+introduced, and table-detection failures propagate through the existing F6 (`PARSER_INTERNAL`)
+catch-all in `Analyzer`, consistent with the approved failure-path design.
+
 ## Assumptions (non-blocking, flagged per house rules — same pattern as REQ-004)
 
 The story specifies `detect_type`, `ParserAdapter`, `Analyzer.analyze`, the two adapters, and the
@@ -243,7 +258,12 @@ class Analyzer:
 class PyMuPDFParser(ParserAdapter):
     """Routes for DIGITAL_PDF. Thin wrap of pymupdf (fitz) — extracts text with
     page/paragraph boundaries; maps blocks to Element(PARAGRAPH | HEADING, ...) via
-    pymupdf's own block/font-size signals only, no custom layout algorithm."""
+    pymupdf's own block/font-size signals only, no custom layout algorithm. Also
+    detects tables via pymupdf's own find_tables() API and emits Element(TABLE, ...)
+    with the same metadata["cells"] shape (row_index/column_index/content) as
+    DocumentIntelligenceParser (Round 2, see Revision note), so TableAtomicChunkStrategy
+    is reachable through either adapter. Text blocks inside a detected table's bounding
+    box are excluded from PARAGRAPH/HEADING extraction to avoid double-emission."""
 
     def parse(self, envelope: ArrivalEnvelope, bytes_reader: BytesReader) -> list[Element]: ...
 ```
@@ -276,7 +296,7 @@ class DocumentIntelligenceParser(ParserAdapter):
 | `ElementType` (str enum) | — | — | `heading \| paragraph \| table \| list \| image_caption \| code` |
 | `Element` (frozen dataclass) | `type` | `ElementType` | |
 | | `text` | `str` | |
-| | `metadata` | `dict[str, Any]` | adapter-specific (page number, bbox, row/col for tables, etc.) |
+| | `metadata` | `dict[str, Any]` | adapter-specific (page number, bbox); `TABLE` elements from either `PyMuPDFParser` (Round 2) or `DocumentIntelligenceParser` carry `cells` (`row_index`/`column_index`/`content` per cell, plus `row_count`/`column_count`) |
 | | `confidence` | `float \| None` | populated by OCR/layout adapters; `None` for deterministic-text parsers |
 | `AnalyzerError` | `doc_id` | `str` | |
 | | `reason` | `str` | |

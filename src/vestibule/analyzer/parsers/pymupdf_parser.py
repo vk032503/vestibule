@@ -3,7 +3,13 @@
 Extracts text with page/paragraph boundaries; maps text blocks to
 `Element(HEADING | PARAGRAPH, ...)` using PyMuPDF's own block/font-size signals only —
 no custom layout algorithm (house rules: "adapters thin", "never ... implement chunking
-algorithms" applies equally to layout classification here).
+algorithms" applies equally to layout classification here). Tables are detected via
+PyMuPDF's own `find_tables()` API and emitted as `Element(TABLE, ...)` in the same
+`metadata["cells"]` shape `DocumentIntelligenceParser` produces (`row_index`/
+`column_index`/`content`), so `TableAtomicChunkStrategy` is reachable through this
+parser too, not only through the Azure Document Intelligence adapter. Text blocks whose
+bounding box falls inside a detected table's bounding box are excluded from
+HEADING/PARAGRAPH extraction, so a table's own text is never double-emitted as prose.
 
 `pymupdf` is imported lazily, inside `__init__` rather than at module load (issue #19):
 importing this module never hard-fails if `pymupdf` is somehow missing (it is a core
@@ -90,33 +96,137 @@ def _import_pymupdf() -> types.ModuleType:
 
 
 def _page_elements(page: Any, page_index: int) -> list[Element]:
-    """Extracts one `Element` per non-empty text block on `page`.
+    """Extracts one `Element` per non-empty text block and detected table on `page`.
+
+    Tables are detected via PyMuPDF's own `find_tables()` API. A text block whose
+    bounding-box center falls inside a detected table's bounding box is excluded (its
+    content is already carried by the table's own `Element`, avoiding double-emission).
+    The combined list is sorted by each element's top-`y0` bbox coordinate so a table
+    interleaves into true reading-order position relative to surrounding text, rather
+    than trailing after every text block on the page.
 
     Args:
         page: A `pymupdf.Page` (typed `Any` — PyMuPDF ships no precise stubs).
         page_index: Zero-based page number, recorded in each `Element`'s metadata.
 
     Returns:
-        One `Element` per non-empty text block on `page`, in reading order.
+        One `Element` per non-empty text block not inside a table, plus one `TABLE`
+        `Element` per detected table, in top-to-bottom reading order.
     """
-    elements: list[Element] = []
-    for block in page.get_text("dict").get("blocks", []):
-        text = _block_text(block)
-        if not text.strip():
-            continue
-        element_type = (
-            ElementType.HEADING
-            if _block_max_font_size(block) >= _HEADING_FONT_SIZE_THRESHOLD
-            else ElementType.PARAGRAPH
-        )
-        elements.append(
-            Element(
-                type=element_type,
-                text=text,
-                metadata={"page": page_index, "bbox": block.get("bbox")},
-            )
-        )
-    return elements
+    table_elements = _table_elements(page, page_index)
+    table_bboxes = [element.metadata["bbox"] for element in table_elements]
+    text_elements = [
+        element
+        for block in page.get_text("dict").get("blocks", [])
+        if (element := _block_element(block, page_index)) is not None
+        and not _center_in_any_bbox(element.metadata["bbox"], table_bboxes)
+    ]
+    combined = [*table_elements, *text_elements]
+    combined.sort(key=lambda element: _bbox_top(element.metadata.get("bbox")))
+    return combined
+
+
+def _block_element(block: dict[str, Any], page_index: int) -> Element | None:
+    """Maps one text block to a `HEADING`/`PARAGRAPH` `Element`, or `None` if empty.
+
+    Args:
+        block: One entry of `page.get_text("dict")["blocks"]`.
+        page_index: Zero-based page number, recorded in the `Element`'s metadata.
+
+    Returns:
+        The mapped `Element`, or `None` if `block` has no extractable text.
+    """
+    text = _block_text(block)
+    if not text.strip():
+        return None
+    element_type = (
+        ElementType.HEADING
+        if _block_max_font_size(block) >= _HEADING_FONT_SIZE_THRESHOLD
+        else ElementType.PARAGRAPH
+    )
+    return Element(
+        type=element_type,
+        text=text,
+        metadata={"page": page_index, "bbox": block.get("bbox")},
+    )
+
+
+def _table_elements(page: Any, page_index: int) -> list[Element]:
+    """Detects tables on `page` via PyMuPDF's own `find_tables()` API.
+
+    Args:
+        page: A `pymupdf.Page`.
+        page_index: Zero-based page number, recorded in each `Element`'s metadata.
+
+    Returns:
+        One `ElementType.TABLE` `Element` per table PyMuPDF detects on `page`, matching
+        `DocumentIntelligenceParser`'s `TABLE` element shape exactly.
+    """
+    return [_table_element(table, page_index) for table in page.find_tables().tables]
+
+
+def _table_element(table: Any, page_index: int) -> Element:
+    """Maps one detected PyMuPDF table to a `TABLE` `Element` (docint_parser shape).
+
+    Args:
+        table: One entry of `page.find_tables().tables` (typed `Any` — PyMuPDF ships
+            no precise stubs).
+        page_index: Zero-based page number, recorded in the `Element`'s metadata.
+
+    Returns:
+        A `TABLE` `Element` with `metadata["cells"]` in the `row_index`/`column_index`/
+        `content` shape, `text` a row-major reading-order join of cell content.
+    """
+    cells = [
+        {"row_index": row_index, "column_index": column_index, "content": content}
+        for row_index, row in enumerate(table.extract())
+        for column_index, content in enumerate(row)
+    ]
+    return Element(
+        type=ElementType.TABLE,
+        text="\n".join(str(cell["content"]) for cell in cells),
+        metadata={
+            "page": page_index,
+            "bbox": table.bbox,
+            "row_count": table.row_count,
+            "column_count": table.col_count,
+            "cells": cells,
+        },
+    )
+
+
+def _center_in_any_bbox(
+    bbox: tuple[float, float, float, float] | None,
+    table_bboxes: list[tuple[float, float, float, float]],
+) -> bool:
+    """True if `bbox`'s center point lies within any of `table_bboxes`.
+
+    A simple bounding-box containment check (house rules: no hand-rolled layout
+    algorithm) — sufficient to exclude a table's own text blocks from HEADING/PARAGRAPH
+    extraction without misclassifying nearby non-table text.
+
+    Args:
+        bbox: A `(x0, y0, x1, y1)` tuple, or `None` if the block carries no bbox.
+        table_bboxes: Bounding boxes of tables detected on the same page.
+
+    Returns:
+        `True` if `bbox` is not `None` and its center point falls inside any bbox in
+        `table_bboxes`.
+    """
+    if bbox is None:
+        return False
+    center_x = (bbox[0] + bbox[2]) / 2
+    center_y = (bbox[1] + bbox[3]) / 2
+    return any(
+        table_bbox[0] <= center_x <= table_bbox[2]
+        and table_bbox[1] <= center_y <= table_bbox[3]
+        for table_bbox in table_bboxes
+    )
+
+
+def _bbox_top(bbox: tuple[float, float, float, float] | None) -> float:
+    """The bbox's top `y0` coordinate, or `0.0` if `bbox` is `None` (defensive default)."""
+    return bbox[1] if bbox is not None else 0.0
 
 
 def _block_text(block: dict[str, Any]) -> str:

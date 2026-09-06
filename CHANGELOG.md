@@ -79,7 +79,21 @@ Versioning: [SemVer](https://semver.org/).
 - _(none yet)_
 
 ### Fixed
-- _(none yet)_
+- REQ-005: `PyMuPDFParser` now detects tables via PyMuPDF's own `find_tables()` API and
+  emits `ElementType.TABLE` elements in the same `metadata["cells"]` shape
+  (`row_index`/`column_index`/`content`, plus `row_count`/`column_count`)
+  `DocumentIntelligenceParser` produces, so `TableAtomicChunkStrategy` (REQ-006) is now
+  reachable via the local, zero-cloud-credentials path — previously only the Azure
+  Document Intelligence adapter ever produced a `TABLE` element, and `examples/
+  quickstart.py` had to synthesize a fake one by hand just to demonstrate table-atomic
+  chunking at all. Text blocks whose bounding box falls inside a detected table's
+  bounding box are excluded from HEADING/PARAGRAPH extraction (a simple bbox-center
+  containment check, not a general layout algorithm), so a table's own text is never
+  double-emitted as prose; detected tables are interleaved into each page's element
+  list in true top-to-bottom reading order (sorted by bbox `y0`) rather than appended
+  after every other element on the page, preserving the caption-adjacency heuristic
+  `Chunker._caption_for_table` depends on. `examples/quickstart.py`'s
+  `_inject_demo_table_element` synthetic-table workaround is removed accordingly.
 
 ### Security
 - _(none yet)_
