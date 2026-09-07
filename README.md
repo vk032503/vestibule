@@ -35,7 +35,7 @@ If you need those parts today, Vestibule is the wrong entry point. If you're pla
 ## Install
 
 ```bash
-pip install vestibule
+pip install "vestibule-rag[local]"
 ```
 
 Requires Python 3.11.
